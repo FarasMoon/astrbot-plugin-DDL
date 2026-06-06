@@ -17,7 +17,7 @@ from astrbot.api import logger
 DEFAULT_KEYWORDS = ["截止", "截止时间", "截止日期", "deadline", "ddl", "交作业"]
 
 
-@register("ddldetect", "YourName", "DDL 检测插件 - 自动检测并保存群内 DDL 消息", "1.0.0")
+@register("ddldetect", "FarasMoon", "DDL 检测插件 - 自动检测并保存群内 DDL 消息", "1.1.0")
 class DDLDetectPlugin(Star):
     """DDL 检测插件主类"""
 

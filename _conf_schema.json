@@ -24,37 +24,38 @@
     "type": "int",
     "default": 48
   },
-  "output_format": {
-    "description": "DDL 输出格式",
-    "type": "string",
-    "default": "image",
-    "hint": "text: 文字输出；image: 图片输出",
-    "options": ["text", "image"]
+  "output_as_image": {
+    "description": "以图片形式输出 DDL",
+    "type": "bool",
+    "default": true,
+    "hint": "开启: 图片卡片；关闭: 文字输出"
   },
-  "background_mode": {
-    "description": "图片背景模式",
-    "type": "string",
-    "default": "image",
-    "hint": "image: 背景图 API；color: 纯色背景",
-    "options": ["image", "color"]
+  "background_as_image": {
+    "description": "使用背景图（否则为纯色）",
+    "type": "bool",
+    "default": true,
+    "hint": "开启: 随机背景图 API；关闭: 纯色背景"
   },
   "background_api": {
-    "description": "背景图 API（background_mode=image 时生效）",
+    "description": "背景图 API",
     "type": "string",
     "default": "https://t.alcy.cc/moez",
-    "hint": "用于生成随机背景图的 API 地址"
+    "hint": "用于生成随机背景图的 API 地址",
+    "condition": {"background_as_image": true}
   },
   "background_color": {
-    "description": "纯色背景（background_mode=color 时生效）",
+    "description": "纯色背景",
     "type": "string",
     "default": "#f0f0f0",
-    "hint": "CSS 颜色值，如 #f0f0f0、#e8f4fd"
+    "hint": "CSS 颜色值，如 #f0f0f0、#e8f4fd",
+    "condition": {"background_as_image": false}
   },
   "background_opacity": {
-    "description": "背景图透明度（仅 background_mode=image 时生效）",
+    "description": "背景图透明度",
     "type": "float",
     "default": 0.12,
-    "hint": "0.0 为完全透明，1.0 为完全不透明"
+    "hint": "0.0 为完全透明，1.0 为完全不透明",
+    "condition": {"background_as_image": true}
   },
   "enable_notification": {
     "description": "是否启用定时通知",
@@ -73,12 +74,11 @@
     "default": true,
     "hint": "监听所有已加群的DDL消息，汇总推送给管理员"
   },
-  "silent_group_mode": {
-    "description": "静默监听-群过滤模式",
-    "type": "string",
-    "default": "blacklist",
-    "options": ["blacklist", "whitelist"],
-    "hint": "blacklist: 黑名单(排除列表中的群); whitelist: 白名单(仅监听列表中的群)"
+  "silent_whitelist": {
+    "description": "群过滤方式：白名单",
+    "type": "bool",
+    "default": false,
+    "hint": "开启: 仅监听列表中的群；关闭: 排除列表中的群（黑名单）"
   },
   "silent_group_list": {
     "description": "静默监听-群过滤列表",
@@ -110,9 +110,10 @@
     "hint": "任务截止时间前N小时提醒管理员，设为-1禁用"
   },
   "deadline_remind_persona": {
-    "description": "提醒时使用的人格ID（留空用默认人格）",
+    "description": "提醒时使用的人格",
     "type": "string",
     "default": "",
-    "hint": "使用 /ddl_personas 查看可用人格列表，填入对应的ID"
+    "_special": "select_persona",
+    "hint": "留空使用默认人格；选择后 LLM 将按该人格风格生成提醒文案"
   }
 }

@@ -2,7 +2,7 @@
 
 import os
 import sys
-# 确保插件目录在 sys.path 中，使 src.autoddldetect 可导入
+# 确保插件目录在 sys.path 中，使 lib 可导入
 _plugin_dir = os.path.dirname(os.path.abspath(__file__))
 if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)
@@ -15,22 +15,22 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 
-from src.autoddldetect.detector import parse_keywords, build_pattern, extract_ddl
-from src.autoddldetect.time_parser import resolve_relative_time
-from src.autoddldetect.summarizer import summarize_ddl
-from src.autoddldetect.renderer import categorize_ddls, format_text_ddl, render_image_card
+from lib.detector import parse_keywords, build_pattern, extract_ddl
+from lib.time_parser import resolve_relative_time
+from lib.summarizer import summarize_ddl
+from lib.renderer import categorize_ddls, format_text_ddl, render_image_card
 
 
 # ── 静默监听工具函数 ────────────────────────────────────────
 
-def _should_monitor_group(group_id: str, group_mode: str, group_list_str: str) -> bool:
+def _should_monitor_group(group_id: str, silent_whitelist: bool, group_list_str: str) -> bool:
     """判断群是否应被静默监听"""
     if not group_list_str.strip():
-        return group_mode == "blacklist"
+        return not silent_whitelist
     group_ids = [g.strip() for g in group_list_str.split(",") if g.strip()]
-    if group_mode == "blacklist":
-        return group_id not in group_ids
-    return group_id in group_ids
+    if silent_whitelist:
+        return group_id in group_ids
+    return group_id not in group_ids
 
 
 def _format_silent_msg(raw_ddl: dict) -> str:
@@ -183,9 +183,9 @@ class DDLDetectPlugin(Star):
 
         # 静默监听模式：跨平台推送给所有管理员
         if self.config.get("silent_mode", True) and self.admin_ids:
-            group_mode = self.config.get("silent_group_mode", "blacklist")
+            silent_whitelist = self.config.get("silent_whitelist", False)
             group_list_str = self.config.get("silent_group_list", "")
-            if _should_monitor_group(group_id, group_mode, group_list_str):
+            if _should_monitor_group(group_id, silent_whitelist, group_list_str):
                 if self.config.get("enable_llm_summary", True):
                     summary = await summarize_ddl(raw_ddl, event, self.context)
                     if summary:
@@ -268,12 +268,12 @@ class DDLDetectPlugin(Star):
         if not groups:
             return "📭 暂无监听的群组"
 
-        group_mode = self.config.get("silent_group_mode", "blacklist")
+        silent_whitelist = self.config.get("silent_whitelist", False)
         group_list_str = self.config.get("silent_group_list", "")
         all_today_ddls = []
 
         for gid in groups:
-            if not _should_monitor_group(gid, group_mode, group_list_str):
+            if not _should_monitor_group(gid, silent_whitelist, group_list_str):
                 continue
 
             key = f"ddl_{gid}"
@@ -307,7 +307,10 @@ class DDLDetectPlugin(Star):
                 if summary:
                     ddl['summary'] = summary
 
-        output_format = group_output_format.get(group_id, self.config.get("output_format", "text"))
+        output_format = group_output_format.get(
+            group_id,
+            "image" if self.config.get("output_as_image", True) else "text"
+        )
         source_info = ""
         if group_id == "__admin_all_groups__":
             source_info = self._build_source_info(today_ddls)
@@ -316,8 +319,9 @@ class DDLDetectPlugin(Star):
 
         if output_format == "image":
             try:
-                bg_mode = self.config.get("background_mode", "image")
-                bg_value = self.config.get("background_color", "#f0f0f0") if bg_mode == "color" else self.config.get("background_api", "https://t.alcy.cc/moez")
+                bg_as_image = self.config.get("background_as_image", True)
+                bg_value = self.config.get("background_color", "#f0f0f0") if not bg_as_image else self.config.get("background_api", "https://t.alcy.cc/moez")
+                bg_mode = "image" if bg_as_image else "color"
                 url = await render_image_card(
                     self, urgent_ddls, soon_ddls, normal_ddls,
                     urgent_hours, soon_hours, bg_mode, bg_value,
@@ -410,7 +414,10 @@ class DDLDetectPlugin(Star):
         soon_hours = self.config.get("soon_hours", 48)
         urgent_ddls, soon_ddls, normal_ddls = categorize_ddls(today_ddls, urgent_hours, soon_hours)
 
-        output_format = group_output_format.get(group_id, self.config.get("output_format", "text"))
+        output_format = group_output_format.get(
+            group_id,
+            "image" if self.config.get("output_as_image", True) else "text"
+        )
 
         if self.config.get("enable_llm_summary", True):
             for ddl in urgent_ddls + soon_ddls + normal_ddls:
@@ -420,8 +427,9 @@ class DDLDetectPlugin(Star):
 
         if output_format == "image":
             try:
-                bg_mode = self.config.get("background_mode", "image")
-                bg_value = self.config.get("background_color", "#f0f0f0") if bg_mode == "color" else self.config.get("background_api", "https://t.alcy.cc/moez")
+                bg_as_image = self.config.get("background_as_image", True)
+                bg_value = self.config.get("background_color", "#f0f0f0") if not bg_as_image else self.config.get("background_api", "https://t.alcy.cc/moez")
+                bg_mode = "image" if bg_as_image else "color"
                 url = await render_image_card(
                     self, urgent_ddls, soon_ddls, normal_ddls,
                     urgent_hours, soon_hours, bg_mode, bg_value
@@ -517,15 +525,15 @@ class DDLDetectPlugin(Star):
         from astrbot.api.star import StarTools
         import astrbot.api.message_components as Comp
         from astrbot.api.event import MessageChain
-        from .time_parser import parse_ddl_time as _parse_time
+        from lib.time_parser import parse_ddl_time as _parse_time
 
         now = datetime.now()
         notified_count = 0
 
         for gid in list(self.monitored_groups):
-            group_mode = self.config.get("silent_group_mode", "blacklist")
+            silent_whitelist = self.config.get("silent_whitelist", False)
             group_list_str = self.config.get("silent_group_list", "")
-            if not _should_monitor_group(gid, group_mode, group_list_str):
+            if not _should_monitor_group(gid, silent_whitelist, group_list_str):
                 continue
 
             key = f"ddl_{gid}"

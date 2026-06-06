@@ -30,7 +30,7 @@ Issues = "https://github.com/FarasMoon/astrbot_plugin_Auto_ddl_Detect/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src/autoddldetect*"]
+include = ["lib*"]
 
 [tool.ruff]
 line-length = 100

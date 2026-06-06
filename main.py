@@ -457,8 +457,14 @@ class DDLDetectPlugin(Star):
         # 临时清空去重集，允许再次提醒
         self._reminded_ddls.clear()
         yield event.plain_result("🔄 已清空提醒去重记录，开始检查...")
-        await self._check_deadline_reminders(remind_hours)
-        yield event.plain_result("✅ 截止前提醒检查完成，请查看管理员私聊")
+        sent, total, skip_t, skip_p = await self._check_deadline_reminders(remind_hours)
+        if sent > 0:
+            yield event.plain_result(f"✅ 已发送 {sent} 条提醒，请查看管理员私聊")
+        else:
+            yield event.plain_result(
+                f"⚠️ 未发送任何提醒（共检查 {total} 条 DDL，"
+                f"解析失败 {skip_p} 条，不在 {remind_hours}h 窗口内 {skip_t} 条）"
+            )
 
     @filter.command("ddl_personas")
     async def list_personas(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -521,7 +527,7 @@ class DDLDetectPlugin(Star):
             await asyncio.sleep(300)  # 每 5 分钟检查一次
 
     async def _check_deadline_reminders(self, remind_hours: float):
-        """检查所有监听群的 DDL，提醒即将截止的"""
+        """检查所有监听群的 DDL，提醒即将截止的。返回 (发送数, 总数, 过滤数)"""
         from astrbot.api.star import StarTools
         import astrbot.api.message_components as Comp
         from astrbot.api.event import MessageChain
@@ -529,6 +535,9 @@ class DDLDetectPlugin(Star):
 
         now = datetime.now()
         notified_count = 0
+        total_checked = 0
+        skipped_time = 0
+        skipped_parse = 0
 
         for gid in list(self.monitored_groups):
             silent_whitelist = self.config.get("silent_whitelist", False)
@@ -541,13 +550,16 @@ class DDLDetectPlugin(Star):
             valid_ddls, _ = _clean_expired_ddls(ddl_list, now)
 
             for ddl in valid_ddls:
+                total_checked += 1
                 ddl_time_str = ddl.get('ddl_time', '')
                 deadline = _parse_time(ddl_time_str)
                 if not deadline:
+                    skipped_parse += 1
                     continue
 
                 remaining = (deadline - now).total_seconds() / 3600
                 if remaining < 0 or remaining > remind_hours:
+                    skipped_time += 1
                     continue
 
                 # 去重
@@ -605,15 +617,29 @@ class DDLDetectPlugin(Star):
                     try:
                         chain = MessageChain()
                         chain.chain.append(Comp.Plain(msg_text))
-                        # 使用通用会话格式，取第一个有消息记录的平台
-                        admin_session = f"aiocqhttp:FriendMessage:{admin_id}"
-                        await StarTools.send_message(admin_session, chain)
-                        notified_count += 1
-                    except Exception:
-                        pass
+                        # 尝试多个常见平台前缀
+                        sent_ok = False
+                        for prefix in ("aiocqhttp", "wechat", "qq"):
+                            try:
+                                admin_session = f"{prefix}:FriendMessage:{admin_id}"
+                                await StarTools.send_message(admin_session, chain)
+                                sent_ok = True
+                                break
+                            except Exception:
+                                continue
+                        if sent_ok:
+                            notified_count += 1
+                        else:
+                            logger.warning(f"[DeadlineReminder] 所有平台前缀均无法向 {admin_id} 发送")
+                    except Exception as e:
+                        logger.warning(f"[DeadlineReminder] 发送失败: {e}")
 
         if notified_count > 0:
             logger.info(f"[DeadlineReminder] 已推送 {notified_count} 条截止提醒")
+        else:
+            logger.info(f"[DeadlineReminder] 检查 {total_checked} 条 DDL，均不在截止窗口内（解析失败 {skipped_parse}，时间不匹配 {skipped_time}）")
+
+        return (notified_count, total_checked, skipped_time, skipped_parse)
 
     async def _get_persona_prompt(self) -> str:
         """获取截止提醒人格提示词"""

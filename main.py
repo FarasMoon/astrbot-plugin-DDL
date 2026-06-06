@@ -147,6 +147,20 @@ class DDLDetectPlugin(Star):
         labels = [self._get_group_label(g) for g in gids]
         return "来源: " + "、".join(labels)
 
+    def _get_admin_sessions(self, admin_id: str) -> list:
+        """解析 admin_id 得到有效的消息 session 列表"""
+        if ":" in admin_id:
+            platform, uid = admin_id.split(":", 1)
+            return [f"{platform}:FriendMessage:{uid}"]
+        sessions = []
+        try:
+            for inst in self.context.platform_manager.platform_insts:
+                pid = inst.meta().id
+                sessions.append(f"{pid}:FriendMessage:{admin_id}")
+        except Exception:
+            pass
+        return sessions
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent) -> MessageEventResult:
         """监听群消息，检测 DDL 格式"""
@@ -628,15 +642,17 @@ class DDLDetectPlugin(Star):
 
                 # 推送给所有管理员
                 for admin_id in self.admin_ids:
+                    sessions = self._get_admin_sessions(admin_id)
+                    if not sessions:
+                        logger.warning(f"[DeadlineReminder] 无法解析 admin {admin_id} 的平台")
+                        continue
                     try:
                         chain = MessageChain()
                         chain.chain.append(Comp.Plain(msg_text))
-                        # 尝试多个常见平台前缀
                         sent_ok = False
-                        for prefix in ("aiocqhttp", "wechat", "qq"):
+                        for session in sessions:
                             try:
-                                admin_session = f"{prefix}:FriendMessage:{admin_id}"
-                                await StarTools.send_message(admin_session, chain)
+                                await StarTools.send_message(session, chain)
                                 sent_ok = True
                                 break
                             except Exception:
@@ -644,7 +660,7 @@ class DDLDetectPlugin(Star):
                         if sent_ok:
                             notified_count += 1
                         else:
-                            logger.warning(f"[DeadlineReminder] 所有平台前缀均无法向 {admin_id} 发送")
+                            logger.warning(f"[DeadlineReminder] 所有平台均无法向 {admin_id} 发送")
                     except Exception as e:
                         logger.warning(f"[DeadlineReminder] 发送失败: {e}")
 

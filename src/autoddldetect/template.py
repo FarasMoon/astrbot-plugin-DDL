@@ -65,6 +65,7 @@ HTML_TMPL = '''
         
         .header h1 { font-size: 24px; color: #333; font-weight: bold; margin: 0; }
         .header .date { margin-top: 6px; font-size: 13px; color: #666; }
+        .header .source { margin-top: 4px; font-size: 12px; color: #999; }
         
         .content {
             display: flex;
@@ -158,6 +159,9 @@ HTML_TMPL = '''
         <div class="header">
             <h1>📋 今日 DDL</h1>
             <div class="date">{{ date }}</div>
+            {% if source_info %}
+            <div class="source">{{ source_info }}</div>
+            {% endif %}
         </div>
         
         <div class="content">

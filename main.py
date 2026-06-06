@@ -114,7 +114,38 @@ class DDLDetectPlugin(Star):
         self.notification_times = [t.strip() for t in times_str.split(",") if t.strip()]
         admin_str = self.config.get("silent_admin_sid", "")
         self.admin_ids = [a.strip() for a in admin_str.split(",") if a.strip()]
+        # 群名映射
+        self._group_names = self._load_group_names()
+        # 截止提醒追踪
+        self._reminded_ddls: set = set()
+        # 启动截止前提醒后台任务
+        self._reminder_task = asyncio.ensure_future(self._deadline_reminder_loop())
         logger.info(f"AutoDDLDetect 已加载，关键词: {self.keywords}，通知时间: {self.notification_times}，管理员: {self.admin_ids}")
+
+    def _load_group_names(self) -> dict:
+        raw = self.config.get("group_display", "")
+        if not raw.strip():
+            return {}
+        try:
+            import json
+            return json.loads(raw)
+        except Exception:
+            logger.warning(f"群名称映射 JSON 解析失败: {raw}")
+            return {}
+
+    def _get_group_label(self, group_id: str) -> str:
+        name = self._group_names.get(group_id, "")
+        if name:
+            return f"{name}({group_id})"
+        return group_id
+
+    def _build_source_info(self, ddls: list) -> str:
+        """根据 DDL 列表构建来源信息"""
+        gids = sorted(set(d.get('group_id', '') for d in ddls if d.get('group_id')))
+        if not gids:
+            return ""
+        labels = [self._get_group_label(g) for g in gids]
+        return "来源: " + "、".join(labels)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -265,7 +296,7 @@ class DDLDetectPlugin(Star):
         return await self._format_ddl_output(event, merged_id, all_today_ddls)
 
     async def _format_ddl_output(self, event, group_id, today_ddls):
-        """格式化单个群的 DDL 输出，返回 (type, content) 或纯文本"""
+        """格式化单个群的 DDL 输出，返回 (type, content)"""
         urgent_hours = self.config.get("urgent_hours", 24)
         soon_hours = self.config.get("soon_hours", 48)
         urgent_ddls, soon_ddls, normal_ddls = categorize_ddls(today_ddls, urgent_hours, soon_hours)
@@ -277,6 +308,11 @@ class DDLDetectPlugin(Star):
                     ddl['summary'] = summary
 
         output_format = group_output_format.get(group_id, self.config.get("output_format", "text"))
+        source_info = ""
+        if group_id == "__admin_all_groups__":
+            source_info = self._build_source_info(today_ddls)
+        elif group_id != "unknown":
+            source_info = f"本群: {self._get_group_label(group_id)}"
 
         if output_format == "image":
             try:
@@ -284,12 +320,14 @@ class DDLDetectPlugin(Star):
                 bg_value = self.config.get("background_color", "#f0f0f0") if bg_mode == "color" else self.config.get("background_api", "https://t.alcy.cc/moez")
                 url = await render_image_card(
                     self, urgent_ddls, soon_ddls, normal_ddls,
-                    urgent_hours, soon_hours, bg_mode, bg_value
+                    urgent_hours, soon_hours, bg_mode, bg_value,
+                    source_info=source_info
                 )
                 return ("image", url)
             except Exception as e:
                 logger.error(f"生成图片失败: {e}")
-        return ("text", format_text_ddl(urgent_ddls, soon_ddls, normal_ddls, urgent_hours, soon_hours))
+        return ("text", format_text_ddl(urgent_ddls, soon_ddls, normal_ddls,
+                                         urgent_hours, soon_hours, source_info=source_info))
 
     # ── 清除 DDL ──────────────────────────────────────────────
 
@@ -403,4 +441,146 @@ class DDLDetectPlugin(Star):
                 await self.notification_task
             except asyncio.CancelledError:
                 pass
+        if self._reminder_task and not self._reminder_task.done():
+            self._reminder_task.cancel()
+            try:
+                await self._reminder_task
+            except asyncio.CancelledError:
+                pass
         logger.info("AutoDDLDetect 已卸载")
+
+    # ── 截止前提醒 ────────────────────────────────────────────
+
+    async def _deadline_reminder_loop(self):
+        """后台循环，每隔 5 分钟检查是否有 DDL 即将截止"""
+        await asyncio.sleep(10)  # 启动后等 10 秒再开始
+        while True:
+            try:
+                remind_hours = self.config.get("deadline_remind_hours", 6)
+                if remind_hours <= 0:
+                    await asyncio.sleep(300)
+                    continue
+                if not self.config.get("deadline_remind_enabled", True):
+                    await asyncio.sleep(300)
+                    continue
+                if not self.admin_ids:
+                    await asyncio.sleep(300)
+                    continue
+
+                await self._check_deadline_reminders(remind_hours)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[DeadlineReminder] 循环异常: {e}")
+            await asyncio.sleep(300)  # 每 5 分钟检查一次
+
+    async def _check_deadline_reminders(self, remind_hours: float):
+        """检查所有监听群的 DDL，提醒即将截止的"""
+        from astrbot.api.star import StarTools
+        import astrbot.api.message_components as Comp
+        from astrbot.api.event import MessageChain
+        from .time_parser import parse_ddl_time as _parse_time
+
+        now = datetime.now()
+        notified_count = 0
+
+        for gid in list(self.monitored_groups):
+            group_mode = self.config.get("silent_group_mode", "blacklist")
+            group_list_str = self.config.get("silent_group_list", "")
+            if not _should_monitor_group(gid, group_mode, group_list_str):
+                continue
+
+            key = f"ddl_{gid}"
+            ddl_list = await self.get_kv_data(key, [])
+            valid_ddls, _ = _clean_expired_ddls(ddl_list, now)
+
+            for ddl in valid_ddls:
+                ddl_time_str = ddl.get('ddl_time', '')
+                deadline = _parse_time(ddl_time_str)
+                if not deadline:
+                    continue
+
+                remaining = (deadline - now).total_seconds() / 3600
+                if remaining < 0 or remaining > remind_hours:
+                    continue
+
+                # 去重
+                dedup_key = (gid, ddl.get('detected_at', ''), ddl_time_str)
+                if dedup_key in self._reminded_ddls:
+                    continue
+                self._reminded_ddls.add(dedup_key)
+
+                # 构建提醒
+                group_label = self._get_group_label(gid)
+                task = ddl.get('summary') or ddl.get('task', ddl.get('raw_message', ''))
+                sender = ddl.get('sender', '未知')
+                hours_left = max(0, round(remaining * 10) / 10)
+
+                # 尝试用人格 + LLM 生成提醒
+                persona_prompt = await self._get_persona_prompt()
+                if persona_prompt:
+                    try:
+                        provider_id = await self.context.get_current_chat_provider_id(
+                            umo=f"__ddl_reminder__:{gid}"
+                        )
+                        if not provider_id:
+                            provider_id = await self.context.get_current_chat_provider_id(
+                                umo="__ddl_reminder__"
+                            )
+                    except Exception:
+                        provider_id = None
+
+                    if provider_id:
+                        try:
+                            remind_prompt = (
+                                f"{persona_prompt}\n\n"
+                                f"现在需要提醒：来自群「{group_label}」的 {sender} "
+                                f"有一个任务「{task}」将在 {hours_left} 小时后截止（{ddl_time_str}）。"
+                                f"请用你的语气生成一条简洁的提醒消息（不超过100字）。"
+                            )
+                            llm_resp = await self.context.llm_generate(
+                                chat_provider_id=provider_id,
+                                prompt=remind_prompt,
+                            )
+                            if llm_resp and llm_resp.completion_text:
+                                msg_text = llm_resp.completion_text.strip()
+                            else:
+                                msg_text = f"⏰ 提醒：群「{group_label}」中 {sender} 的任务「{task}」将在 {hours_left} 小时后截止（{ddl_time_str}）"
+                        except Exception as e:
+                            logger.warning(f"[DeadlineReminder] LLM 生成失败: {e}")
+                            msg_text = f"⏰ 提醒：群「{group_label}」中 {sender} 的任务「{task}」将在 {hours_left} 小时后截止（{ddl_time_str}）"
+                    else:
+                        msg_text = f"⏰ 提醒：群「{group_label}」中 {sender} 的任务「{task}」将在 {hours_left} 小时后截止（{ddl_time_str}）"
+                else:
+                    msg_text = f"⏰ 提醒：群「{group_label}」中 {sender} 的任务「{task}」将在 {hours_left} 小时后截止（{ddl_time_str}）"
+
+                # 推送给所有管理员
+                for admin_id in self.admin_ids:
+                    try:
+                        chain = MessageChain()
+                        chain.chain.append(Comp.Plain(msg_text))
+                        # 使用通用会话格式，取第一个有消息记录的平台
+                        admin_session = f"aiocqhttp:FriendMessage:{admin_id}"
+                        await StarTools.send_message(admin_session, chain)
+                        notified_count += 1
+                    except Exception:
+                        pass
+
+        if notified_count > 0:
+            logger.info(f"[DeadlineReminder] 已推送 {notified_count} 条截止提醒")
+
+    async def _get_persona_prompt(self) -> str:
+        """获取截止提醒人格提示词"""
+        persona_id = self.config.get("deadline_remind_persona", "")
+        try:
+            if persona_id:
+                persona = await self.context.persona_manager.get_persona(persona_id)
+                if persona and persona.system_prompt:
+                    return persona.system_prompt
+            # 回退到默认人格
+            default = await self.context.persona_manager.get_default_persona_v3(None)
+            if default and default.prompt:
+                return default.prompt
+        except Exception as e:
+            logger.warning(f"[DeadlineReminder] 获取人格失败: {e}")
+        return ""

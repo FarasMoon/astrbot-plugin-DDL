@@ -33,19 +33,27 @@ def categorize_ddls(ddls: list, urgent_hours: int = 24, soon_hours: int = 48) ->
 
 
 def format_text_ddl(urgent_ddls: list, soon_ddls: list, normal_ddls: list,
-                    urgent_hours: int = 24, soon_hours: int = 48) -> str:
+                    urgent_hours: int = 24, soon_hours: int = 48,
+                    source_info: str = "") -> str:
     """格式化文字 DDL 输出，分类显示（优先使用 LLM 总结）"""
     def _fmt(ddl):
         return ddl.get('summary') or ddl.get('task', '')[:20] or ddl.get('raw_message', '')[:20]
 
+    def _group_label(ddl):
+        gid = ddl.get('group_id', '')
+        return f"[群{gid}] " if gid else ""
+
     result = []
+    if source_info:
+        result.append(f"📊 {source_info}")
+        result.append("")
 
     result.append(f"🔥 马上截止 ({urgent_hours}小时内)：")
     if urgent_ddls:
         for i, ddl in enumerate(urgent_ddls, 1):
             sender = ddl.get('sender', '未知')
             ddl_time = ddl.get('ddl_time', '未知')
-            result.append(f"  {i}. {sender} | {_fmt(ddl)} | {ddl_time}")
+            result.append(f"  {i}. {_group_label(ddl)}{sender} | {_fmt(ddl)} | {ddl_time}")
     else:
         result.append("  空")
 
@@ -54,7 +62,7 @@ def format_text_ddl(urgent_ddls: list, soon_ddls: list, normal_ddls: list,
         for i, ddl in enumerate(soon_ddls, 1):
             sender = ddl.get('sender', '未知')
             ddl_time = ddl.get('ddl_time', '未知')
-            result.append(f"  {i}. {sender} | {_fmt(ddl)} | {ddl_time}")
+            result.append(f"  {i}. {_group_label(ddl)}{sender} | {_fmt(ddl)} | {ddl_time}")
     else:
         result.append("  空")
 
@@ -63,7 +71,7 @@ def format_text_ddl(urgent_ddls: list, soon_ddls: list, normal_ddls: list,
         for i, ddl in enumerate(normal_ddls, 1):
             sender = ddl.get('sender', '未知')
             ddl_time = ddl.get('ddl_time', '未知')
-            result.append(f"  {i}. {sender} | {_fmt(ddl)} | {ddl_time}")
+            result.append(f"  {i}. {_group_label(ddl)}{sender} | {_fmt(ddl)} | {ddl_time}")
     else:
         result.append("  空")
 
@@ -73,7 +81,8 @@ def format_text_ddl(urgent_ddls: list, soon_ddls: list, normal_ddls: list,
 async def render_image_card(context: Any, urgent_ddls: list, soon_ddls: list,
                             normal_ddls: list, urgent_hours: int, soon_hours: int,
                             background_mode: str = "image",
-                            background_value: str = "") -> str:
+                            background_value: str = "",
+                            source_info: str = "") -> str:
     """渲染 DDL 图片"""
     from .template import HTML_TMPL
 
@@ -90,6 +99,7 @@ async def render_image_card(context: Any, urgent_ddls: list, soon_ddls: list,
         "background_color": background_value if background_mode == "color" else "",
         "background_url": background_value if background_mode == "image" else "",
         "background_opacity": "0.12",
+        "source_info": source_info,
     }
 
     return await context.html_render(HTML_TMPL, template_vars,

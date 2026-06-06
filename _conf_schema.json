@@ -91,5 +91,28 @@
     "type": "string",
     "default": "",
     "hint": "多个管理员用英文逗号分隔，如 QQ:123456,789012 或 WX:openid1,openid2"
+  },
+  "group_display": {
+    "description": "群名称映射（JSON，用于管理员汇总显示群名）",
+    "type": "string",
+    "default": "",
+    "hint": "格式: {\"群号\":\"群名\"}，如 {\"721647196\":\"学术群\"}"
+  },
+  "deadline_remind_enabled": {
+    "description": "截止前提醒开关",
+    "type": "bool",
+    "default": true
+  },
+  "deadline_remind_hours": {
+    "description": "截止前多少小时提醒（-1为禁用）",
+    "type": "float",
+    "default": 6,
+    "hint": "任务截止时间前N小时提醒管理员，设为-1禁用"
+  },
+  "deadline_remind_persona": {
+    "description": "提醒时使用的人格ID（留空用默认人格）",
+    "type": "string",
+    "default": "",
+    "hint": "AstrBot 人格设定中的人格ID，LLM 将按此人格生成提醒文案"
   }
 }

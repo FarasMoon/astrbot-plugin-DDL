@@ -98,13 +98,23 @@ class DDLDetectPlugin(Star):
         self.ddl_pattern = build_pattern(self.keywords)
         self.notification_task = None
         self.monitored_groups: set = set()
+        self.admin_ids: list = []
+
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """检查消息发送者是否为管理员"""
+        if not self.admin_ids:
+            return False
+        sender_id = event.message_obj.sender.user_id if event.message_obj.sender else ""
+        return sender_id in self.admin_ids
 
     # ── 事件处理 ──────────────────────────────────────────────
 
     async def initialize(self) -> None:
         times_str = self.config.get("notification_times", "08:00")
         self.notification_times = [t.strip() for t in times_str.split(",") if t.strip()]
-        logger.info(f"AutoDDLDetect 已加载，关键词: {self.keywords}，通知时间: {self.notification_times}")
+        admin_str = self.config.get("silent_admin_sid", "")
+        self.admin_ids = [a.strip() for a in admin_str.split(",") if a.strip()]
+        logger.info(f"AutoDDLDetect 已加载，关键词: {self.keywords}，通知时间: {self.notification_times}，管理员: {self.admin_ids}")
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -140,31 +150,29 @@ class DDLDetectPlugin(Star):
                 if summary:
                     yield event.plain_result(f"已检测到 DDL：{summary}")
 
-        # 静默监听模式：跨平台推送（用 sender_id 标识管理员）
-        if self.config.get("silent_mode", True):
-            silent_admin = self.config.get("silent_admin_sid", "")
-            if silent_admin:
-                group_mode = self.config.get("silent_group_mode", "blacklist")
-                group_list_str = self.config.get("silent_group_list", "")
-                if _should_monitor_group(group_id, group_mode, group_list_str):
-                    if self.config.get("enable_llm_summary", True):
-                        summary = await summarize_ddl(raw_ddl, event, self.context)
-                        if summary:
-                            raw_ddl["summary"] = summary
-                    msg_text = _format_silent_msg(raw_ddl)
+        # 静默监听模式：跨平台推送给所有管理员
+        if self.config.get("silent_mode", True) and self.admin_ids:
+            group_mode = self.config.get("silent_group_mode", "blacklist")
+            group_list_str = self.config.get("silent_group_list", "")
+            if _should_monitor_group(group_id, group_mode, group_list_str):
+                if self.config.get("enable_llm_summary", True):
+                    summary = await summarize_ddl(raw_ddl, event, self.context)
+                    if summary:
+                        raw_ddl["summary"] = summary
+                msg_text = _format_silent_msg(raw_ddl)
+                from astrbot.api.star import StarTools
+                import astrbot.api.message_components as Comp
+                from astrbot.api.event import MessageChain
+                platform = event.get_platform_name()
+                for admin_id in self.admin_ids:
                     try:
-                        from astrbot.api.star import StarTools
-                        import astrbot.api.message_components as Comp
-                        from astrbot.api.event import MessageChain
                         chain = MessageChain()
                         chain.chain.append(Comp.Plain(msg_text))
-                        # 跨平台会话：platform:FriendMessage:admin_sender_id
-                        platform = event.get_platform_name()
-                        admin_session = f"{platform}:FriendMessage:{silent_admin}"
+                        admin_session = f"{platform}:FriendMessage:{admin_id}"
                         await StarTools.send_message(admin_session, chain)
-                        logger.info(f"[SilentMonitor] 已推送 DDL 给管理员 {silent_admin}")
+                        logger.info(f"[SilentMonitor] 已推送 DDL 给管理员 {admin_id}")
                     except Exception as e:
-                        logger.error(f"[SilentMonitor] 推送失败: {e}")
+                        logger.error(f"[SilentMonitor] 推送给 {admin_id} 失败: {e}")
 
     # ── 存储 ──────────────────────────────────────────────────
 
@@ -183,9 +191,7 @@ class DDLDetectPlugin(Star):
 
         # 私聊：检查是否为管理员
         if not group_id:
-            admin_sid = self.config.get("silent_admin_sid", "")
-            sender_id = event.message_obj.sender.user_id if event.message_obj.sender else ""
-            if admin_sid and sender_id == admin_sid:
+            if self._is_admin(event):
                 result = await self._query_all_groups_ddl(event)
                 if isinstance(result, tuple):
                     mode, content = result
@@ -287,11 +293,19 @@ class DDLDetectPlugin(Star):
 
     # ── 清除 DDL ──────────────────────────────────────────────
 
-    @filter.command("clearddl", aliases=["清除ddl", "删除ddl"])
+    @filter.command("clearddl", aliases=["清除ddl"])
     async def clear_ddl(self, event: AstrMessageEvent) -> MessageEventResult:
-        """清除今日保存的 DDL"""
-        group_id = event.message_obj.group_id or "unknown"
-        key = f"ddl_{group_id}"
+        """清除当前群聊/用户的 DDL；静默监听模式下管理员清除所有"""
+        group_id = event.message_obj.group_id
+
+        # 静默监听模式 + 管理员（群聊或私聊）→ 清除所有群的 DDL
+        if self.config.get("silent_mode", True) and self._is_admin(event):
+            yield event.plain_result(await self._clear_all_groups_ddl())
+            return
+
+        # 普通用户：清除当前群/私聊的 DDL
+        gid = group_id or "unknown"
+        key = f"ddl_{gid}"
         ddl_list = await self.get_kv_data(key, [])
         today = datetime.now().strftime("%Y-%m-%d")
         remaining_ddls = [ddl for ddl in ddl_list if not ddl.get('detected_at', '').startswith(today)]
@@ -302,6 +316,28 @@ class DDLDetectPlugin(Star):
             yield event.plain_result(f"✅ 已清除今日的 {count} 条 DDL 记录")
         else:
             yield event.plain_result("📭 今日暂无 DDL 记录可清除")
+
+    @filter.command("清除所有ddl")
+    async def clear_all_ddl(self, event: AstrMessageEvent) -> MessageEventResult:
+        """清除所有缓存的 DDL（仅管理员）"""
+        if not self._is_admin(event):
+            yield event.plain_result("❌ 仅管理员可清除所有 DDL")
+            return
+        yield event.plain_result(await self._clear_all_groups_ddl())
+
+    async def _clear_all_groups_ddl(self) -> str:
+        """清除所有已监听群的 DDL 数据"""
+        if not self.monitored_groups:
+            return "📭 暂无监听的群组数据"
+
+        total_removed = 0
+        for gid in list(self.monitored_groups):
+            key = f"ddl_{gid}"
+            await self.put_kv_data(key, [])
+            total_removed += 1
+
+        self.monitored_groups.clear()
+        return f"✅ 已清除 {total_removed} 个群的全部 DDL 记录"
 
     # ── 切换输出格式 ──────────────────────────────────────────
 

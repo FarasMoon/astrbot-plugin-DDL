@@ -90,6 +90,6 @@
     "description": "静默监听-管理员用户ID(跨平台)",
     "type": "string",
     "default": "",
-    "hint": "管理员的平台用户标识（如QQ号/微信号），留空则不推送"
+    "hint": "多个管理员用英文逗号分隔，如 QQ:123456,789012 或 WX:openid1,openid2"
   }
 }

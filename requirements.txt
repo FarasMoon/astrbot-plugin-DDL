@@ -1,0 +1,2 @@
+# DDL Detect Plugin
+# AstrBot Plugin for detecting and saving DDL messages

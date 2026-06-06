@@ -1,0 +1,70 @@
+{
+  "ddl_keywords": {
+    "description": "DDL 关键词，多个用英文逗号分隔",
+    "type": "string",
+    "default": "截止,截止时间,截止日期,deadline,ddl,交作业"
+  },
+  "enable_llm_summary": {
+    "description": "是否启用 LLM 总结（图片和文字模式均支持）",
+    "type": "bool",
+    "default": true
+  },
+  "enable_auto_reply": {
+    "description": "检测到 DDL 后是否自动回复",
+    "type": "bool",
+    "default": true
+  },
+  "urgent_hours": {
+    "description": "马上截止 的时间阈值（小时）",
+    "type": "int",
+    "default": 24
+  },
+  "soon_hours": {
+    "description": "很快截止 的时间阈值（小时）",
+    "type": "int",
+    "default": 48
+  },
+  "output_format": {
+    "description": "DDL 输出格式",
+    "type": "string",
+    "default": "image",
+    "hint": "text: 文字输出；image: 图片输出",
+    "options": ["text", "image"]
+  },
+  "background_mode": {
+    "description": "图片背景模式",
+    "type": "string",
+    "default": "image",
+    "hint": "image: 背景图 API；color: 纯色背景",
+    "options": ["image", "color"]
+  },
+  "background_api": {
+    "description": "背景图 API（background_mode=image 时生效）",
+    "type": "string",
+    "default": "https://t.alcy.cc/moez",
+    "hint": "用于生成随机背景图的 API 地址"
+  },
+  "background_color": {
+    "description": "纯色背景（background_mode=color 时生效）",
+    "type": "string",
+    "default": "#f0f0f0",
+    "hint": "CSS 颜色值，如 #f0f0f0、#e8f4fd"
+  },
+  "background_opacity": {
+    "description": "背景图透明度（仅 background_mode=image 时生效）",
+    "type": "float",
+    "default": 0.12,
+    "hint": "0.0 为完全透明，1.0 为完全不透明"
+  },
+  "enable_notification": {
+    "description": "是否启用定时通知",
+    "type": "bool",
+    "default": false
+  },
+  "notification_times": {
+    "description": "定时通知时间（多个用英文逗号分隔）",
+    "type": "string",
+    "default": "08:00",
+    "hint": "格式：HH:MM,HH:MM，如 08:00,18:00,22:00"
+  }
+}

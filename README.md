@@ -15,7 +15,7 @@ AstrBot 群聊 DDL 自动检测插件
 
 > **作者**: FarasMoon | [仓库](https://github.com/FarasMoon/astrbot_plugin_Auto_ddl_Detect)
 >
-> [!ATTENTION]
+> [!]
 > 大量 vibe coding 注意
 > 可能维护困难
 

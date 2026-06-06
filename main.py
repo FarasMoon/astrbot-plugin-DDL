@@ -327,7 +327,7 @@ class DDLDetectPlugin(Star):
             except Exception as e:
                 logger.error(f"生成图片失败: {e}")
         return ("text", format_text_ddl(urgent_ddls, soon_ddls, normal_ddls,
-                                         urgent_hours, soon_hours, source_info=source_info))
+                                         urgent_hours, soon_hours, source_info))
 
     # ── 清除 DDL ──────────────────────────────────────────────
 
@@ -431,6 +431,44 @@ class DDLDetectPlugin(Star):
                 yield event.plain_result(f"生成测试图片失败: {e}")
         else:
             yield event.plain_result(format_text_ddl(urgent_ddls, soon_ddls, normal_ddls, urgent_hours, soon_hours))
+
+    @filter.command("ddl_remind_test")
+    async def test_reminder(self, event: AstrMessageEvent) -> MessageEventResult:
+        """手动触发截止前提醒测试"""
+        remind_hours = self.config.get("deadline_remind_hours", 6)
+        if remind_hours <= 0 or not self.config.get("deadline_remind_enabled", True):
+            yield event.plain_result("⚠️ 截止前提醒未启用或 remind_hours <= 0")
+            return
+        if not self.admin_ids:
+            yield event.plain_result("⚠️ 未配置管理员(silent_admin_sid)，无法发送提醒")
+            return
+        if not self.monitored_groups:
+            yield event.plain_result("📭 暂无监听的群组")
+            return
+
+        # 临时清空去重集，允许再次提醒
+        self._reminded_ddls.clear()
+        yield event.plain_result("🔄 已清空提醒去重记录，开始检查...")
+        await self._check_deadline_reminders(remind_hours)
+        yield event.plain_result("✅ 截止前提醒检查完成，请查看管理员私聊")
+
+    @filter.command("ddl_personas")
+    async def list_personas(self, event: AstrMessageEvent) -> MessageEventResult:
+        """列出 AstrBot 中可用的人格列表"""
+        try:
+            persona_mgr = self.context.persona_manager
+            personas = await persona_mgr.get_all_personas()
+            if not personas:
+                yield event.plain_result("📭 当前无可用人格，请在 AstrBot 人格设置中创建")
+                return
+
+            lines = ["📋 可用人格列表（填入 deadline_remind_persona）："]
+            for p in personas:
+                pid = getattr(p, 'persona_id', '?')
+                lines.append(f"  - {pid}")
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            yield event.plain_result(f"获取人格列表失败: {e}")
 
     # ── 销毁 ──────────────────────────────────────────────────
 

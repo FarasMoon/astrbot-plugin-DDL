@@ -5,6 +5,7 @@ from .detector import DEFAULT_KEYWORDS, parse_keywords, build_pattern, extract_d
 from .time_parser import resolve_relative_time, parse_ddl_time
 from .summarizer import summarize_ddl
 from .renderer import categorize_ddls, format_text_ddl, render_image_card
+from .silent_monitor import should_monitor_group, notify_admin
 
 __all__ = [
     "HTML_TMPL",
@@ -18,4 +19,6 @@ __all__ = [
     "categorize_ddls",
     "format_text_ddl",
     "render_image_card",
+    "should_monitor_group",
+    "notify_admin",
 ]

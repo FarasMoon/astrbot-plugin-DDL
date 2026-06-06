@@ -66,5 +66,30 @@
     "type": "string",
     "default": "08:00",
     "hint": "格式：HH:MM,HH:MM，如 08:00,18:00,22:00"
+  },
+  "silent_mode": {
+    "description": "静默监听模式",
+    "type": "bool",
+    "default": true,
+    "hint": "监听所有已加群的DDL消息，汇总推送给管理员"
+  },
+  "silent_group_mode": {
+    "description": "静默监听-群过滤模式",
+    "type": "string",
+    "default": "blacklist",
+    "options": ["blacklist", "whitelist"],
+    "hint": "blacklist: 黑名单(排除列表中的群); whitelist: 白名单(仅监听列表中的群)"
+  },
+  "silent_group_list": {
+    "description": "静默监听-群过滤列表",
+    "type": "string",
+    "default": "",
+    "hint": "多个群号用英文逗号分隔，如 123456,789012"
+  },
+  "silent_admin_sid": {
+    "description": "静默监听-管理员QQ号",
+    "type": "string",
+    "default": "",
+    "hint": "接收DDL汇总推送的QQ号，留空则不推送"
   }
 }

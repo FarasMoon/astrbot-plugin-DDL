@@ -19,6 +19,7 @@ from src.autoddldetect.detector import parse_keywords, build_pattern, extract_dd
 from src.autoddldetect.time_parser import resolve_relative_time
 from src.autoddldetect.summarizer import summarize_ddl
 from src.autoddldetect.renderer import categorize_ddls, format_text_ddl, render_image_card
+from src.autoddldetect.silent_monitor import should_monitor_group, notify_admin
 
 # 切换命令的临时存储
 group_output_format = {}
@@ -74,6 +75,19 @@ class DDLDetectPlugin(Star):
                 summary = await summarize_ddl(raw_ddl, event, self.context)
                 if summary:
                     yield event.plain_result(f"已检测到 DDL：{summary}")
+
+        # 静默监听模式
+        if self.config.get("silent_mode", True):
+            silent_admin = self.config.get("silent_admin_sid", "")
+            if silent_admin:
+                group_mode = self.config.get("silent_group_mode", "blacklist")
+                group_list_str = self.config.get("silent_group_list", "")
+                if should_monitor_group(group_id, group_mode, group_list_str):
+                    if self.config.get("enable_llm_summary", True):
+                        summary = await summarize_ddl(raw_ddl, event, self.context)
+                        if summary:
+                            raw_ddl["summary"] = summary
+                    await notify_admin(event, raw_ddl, silent_admin)
 
     # ── 存储 ──────────────────────────────────────────────────
 

@@ -52,10 +52,10 @@ class DDLDetectPlugin(Star):
             r"(\d{1,2}[/-]\d{1,2})(?!\d)",
             # 2024年6月10日
             r"(\d{4}年\d{1,2}月\d{1,2}[日]?)",
-            # 今天/明天/今晚 14点
+            # 今天/明天/今晚/今晚19点
             r"(今天|明天|今晚)(?:\s*[0-2]?\d点?(?:\d{1,2}分?)?)?",
-            # 本周五、下周三
-            r"(本周|下周)[一二三四五六日]",
+            # 周四晚上19点/周四19点/本周四/下周四
+            r"((?:本周|下周)?)[一二三四五六日](?:[早晚]?\s*[0-2]?\d点?(?:\d{1,2}分?)?)?",
             # 任意数字时间
             r"(\d{1,2}[时点:]\d{2})",
         ]
@@ -65,29 +65,27 @@ class DDLDetectPlugin(Star):
         return re.compile(pattern, re.IGNORECASE)
 
     def _resolve_relative_time(self, matched_time: str) -> str:
-        """解析相对时间（如今天、明天、本周三等）"""
+        """解析相对时间（如今天、明天、本周三、周四晚上等）"""
         now = datetime.now()
 
-        if matched_time in ["今天"]:
-            return now.strftime("%m月%d日")
-        if matched_time in ["明天"]:
-            return (now + timedelta(days=1)).strftime("%m月%d日")
-        if matched_time in ["今晚"]:
+        # 处理纯相对时间
+        if matched_time in ["今天", "明天", "今晚"]:
+            if matched_time == "明天":
+                return (now + timedelta(days=1)).strftime("%m月%d日")
             return now.strftime("%m月%d日")
 
-        # 处理本周/下周
-        if "本周" in matched_time or "下周" in matched_time:
-            day_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6}
-            for day_name, day_offset in day_map.items():
-                if day_name in matched_time:
-                    is_next_week = "下周" in matched_time
-                    days_ahead = day_offset - now.weekday()
-                    if is_next_week:
-                        days_ahead += 7
-                    elif days_ahead < 0:
-                        days_ahead += 7
-                    target = now + timedelta(days=days_ahead)
-                    return target.strftime("%m月%d日")
+        # 处理本周/下周 + 星期
+        is_next_week = "下周" in matched_time
+        day_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6}
+        for day_name, day_offset in day_map.items():
+            if day_name in matched_time:
+                days_ahead = day_offset - now.weekday()
+                if is_next_week:
+                    days_ahead += 7
+                elif days_ahead <= 0:  # 单独的"周四"默认指本周四（如果已过则指下周）
+                    days_ahead += 7
+                target = now + timedelta(days=days_ahead)
+                return target.strftime("%m月%d日")
 
         return matched_time
 

@@ -171,7 +171,7 @@ HTML_TMPL = '''
                     {% for ddl in urgent_ddls %}
                         <li class="ddl-item">
                             <div class="ddl-header">
-                                <span class="ddl-sender">{{ ddl.sender }}</span>
+                                <span class="ddl-sender">{{ ddl.sender }} {% if ddl.group_id %}<span style="color:#888;font-size:10px;">群{{ ddl.group_id }}</span>{% endif %}</span>
                                 <span class="ddl-time">{{ ddl.ddl_time }}</span>
                             </div>
                             <div class="ddl-task">{{ ddl.summary if ddl.summary else ddl.task }}</div>
@@ -193,7 +193,7 @@ HTML_TMPL = '''
                     {% for ddl in soon_ddls %}
                         <li class="ddl-item">
                             <div class="ddl-header">
-                                <span class="ddl-sender">{{ ddl.sender }}</span>
+                                <span class="ddl-sender">{{ ddl.sender }} {% if ddl.group_id %}<span style="color:#888;font-size:10px;">群{{ ddl.group_id }}</span>{% endif %}</span>
                                 <span class="ddl-time">{{ ddl.ddl_time }}</span>
                             </div>
                             <div class="ddl-task">{{ ddl.summary if ddl.summary else ddl.task }}</div>
@@ -215,7 +215,7 @@ HTML_TMPL = '''
                     {% for ddl in normal_ddls %}
                         <li class="ddl-item">
                             <div class="ddl-header">
-                                <span class="ddl-sender">{{ ddl.sender }}</span>
+                                <span class="ddl-sender">{{ ddl.sender }} {% if ddl.group_id %}<span style="color:#888;font-size:10px;">群{{ ddl.group_id }}</span>{% endif %}</span>
                                 <span class="ddl-time">{{ ddl.ddl_time }}</span>
                             </div>
                             <div class="ddl-task">{{ ddl.summary if ddl.summary else ddl.task }}</div>

@@ -1,14 +1,48 @@
-# astrbot-plugin-helloworld
+# DDL 检测插件
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+AstrBot 插件 - 自动检测并保存群内 DDL 消息
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 功能特性
 
-# Supports
+- 自动检测群消息中的 DDL 格式（`截止：时间+日期`）
+- 调用 LLM 总结 DDL 关键内容
+- 用户发送 `/ddl` 查询今日保存的 DDL
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## 支持的 DDL 格式
+
+- `截止：6月10日`
+- `截止：6-10`
+- `截止：6月10日14:00`
+- `截止：6月10日 14:00分`
+
+## 使用方法
+
+1. 将插件放入 `data/plugins/` 目录
+2. 重启 AstrBot
+3. 发送包含 DDL 格式的消息，插件自动检测并保存
+4. 发送 `/ddl` 查询今日 DDL
+
+## 项目结构
+
+```
+DDLdetectPlugin/
+├── src/ddldetect/       # 源代码
+│   ├── __init__.py
+│   ├── plugin.py        # 插件主逻辑
+│   └── utils.py         # 工具函数
+├── main.py              # 插件入口
+├── metadata.yaml        # 插件配置
+├── requirements.txt     # 依赖
+├── pyproject.toml       # 项目配置
+└── README.md
+```
+
+## 开发
+
+```bash
+# 安装依赖
+pip install -e .
+
+# 代码检查
+ruff check src/
+```

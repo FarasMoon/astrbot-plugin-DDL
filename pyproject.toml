@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddldetect"
+version = "1.0.0"
+description = "DDL 检测插件 - 自动检测并保存群内 DDL 消息"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "YourName", email = "your.email@example.com"}
+]
+keywords = ["astrbot", "plugin", "ddl", "deadline"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourname/ddldetect"
+Repository = "https://github.com/yourname/ddldetect"
+Issues = "https://github.com/yourname/ddldetect/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src/ddldetect*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]

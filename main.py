@@ -49,6 +49,40 @@ def _format_silent_msg(raw_ddl: dict) -> str:
         f"时间: {detected_at}"
     )
 
+
+# ── DDL 过期清理 ────────────────────────────────────────────
+
+def _clean_expired_ddls(ddl_list: list, now: datetime) -> tuple:
+    """清理已过期的 DDL，返回 (有效列表, 清理数量)"""
+    valid_ddls = []
+    removed_count = 0
+    for ddl in ddl_list:
+        ddl_time_str = ddl.get('ddl_time', '')
+        try:
+            for fmt in ['%m月%d日', '%m月%d日%H点', '%m月%d日%H:%M']:
+                try:
+                    parsed_time = datetime.strptime(ddl_time_str, fmt)
+                    parsed_time = parsed_time.replace(year=now.year)
+                    if parsed_time < now:
+                        removed_count += 1
+                    else:
+                        valid_ddls.append(ddl)
+                    break
+                except ValueError:
+                    continue
+            else:
+                valid_ddls.append(ddl)
+        except Exception:
+            valid_ddls.append(ddl)
+    return valid_ddls, removed_count
+
+
+def _filter_today(ddls: list) -> list:
+    """筛选今天的 DDL"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    return [ddl for ddl in ddls if ddl.get('detected_at', '').startswith(today)]
+
+
 # 切换命令的临时存储
 group_output_format = {}
 
@@ -63,6 +97,7 @@ class DDLDetectPlugin(Star):
         self.keywords = parse_keywords(config.get("ddl_keywords", ""))
         self.ddl_pattern = build_pattern(self.keywords)
         self.notification_task = None
+        self.monitored_groups: set = set()
 
     # ── 事件处理 ──────────────────────────────────────────────
 
@@ -96,6 +131,7 @@ class DDLDetectPlugin(Star):
         }
 
         await self._save_ddl(group_id, raw_ddl)
+        self.monitored_groups.add(group_id)
         logger.info(f"检测到 DDL: {message_str}")
 
         if self.config.get("enable_auto_reply", True):
@@ -104,7 +140,7 @@ class DDLDetectPlugin(Star):
                 if summary:
                     yield event.plain_result(f"已检测到 DDL：{summary}")
 
-        # 静默监听模式
+        # 静默监听模式：跨平台推送（用 sender_id 标识管理员）
         if self.config.get("silent_mode", True):
             silent_admin = self.config.get("silent_admin_sid", "")
             if silent_admin:
@@ -122,12 +158,10 @@ class DDLDetectPlugin(Star):
                         from astrbot.api.event import MessageChain
                         chain = MessageChain()
                         chain.chain.append(Comp.Plain(msg_text))
-                        await StarTools.send_message_by_id(
-                            type="PrivateMessage",
-                            id=silent_admin,
-                            message_chain=chain,
-                            platform=event.get_platform_name(),
-                        )
+                        # 跨平台会话：platform:FriendMessage:admin_sender_id
+                        platform = event.get_platform_name()
+                        admin_session = f"{platform}:FriendMessage:{silent_admin}"
+                        await StarTools.send_message(admin_session, chain)
                         logger.info(f"[SilentMonitor] 已推送 DDL 给管理员 {silent_admin}")
                     except Exception as e:
                         logger.error(f"[SilentMonitor] 推送失败: {e}")
@@ -145,51 +179,85 @@ class DDLDetectPlugin(Star):
     @filter.command("ddl")
     async def query_ddl(self, event: AstrMessageEvent) -> MessageEventResult:
         """查询今日保存的 DDL"""
-        group_id = event.message_obj.group_id or "unknown"
+        group_id = event.message_obj.group_id
+
+        # 私聊：检查是否为管理员
+        if not group_id:
+            admin_sid = self.config.get("silent_admin_sid", "")
+            sender_id = event.message_obj.sender.user_id if event.message_obj.sender else ""
+            if admin_sid and sender_id == admin_sid:
+                yield event.plain_result(await self._query_all_groups_ddl(event))
+                return
+            yield event.plain_result("📭 私聊仅管理员(silent_admin_sid)可查看汇总")
+            return
+
+        # 群聊：查本群 DDL
         key = f"ddl_{group_id}"
+        yield event.plain_result(await self._query_single_group(event, group_id, key))
+
+    async def _query_single_group(self, event, group_id, key):
+        """查询并格式化单个群的 DDL"""
         ddl_list = await self.get_kv_data(key, [])
-
         now = datetime.now()
-        valid_ddls = []
-        removed_count = 0
-
-        for ddl in ddl_list:
-            ddl_time_str = ddl.get('ddl_time', '')
-            try:
-                for fmt in ['%m月%d日', '%m月%d日%H点', '%m月%d日%H:%M']:
-                    try:
-                        parsed_time = datetime.strptime(ddl_time_str, fmt)
-                        parsed_time = parsed_time.replace(year=now.year)
-                        if parsed_time < now:
-                            removed_count += 1
-                        else:
-                            valid_ddls.append(ddl)
-                        break
-                    except ValueError:
-                        continue
-                else:
-                    valid_ddls.append(ddl)
-            except Exception:
-                valid_ddls.append(ddl)
-
+        valid_ddls, removed_count = _clean_expired_ddls(ddl_list, now)
         if removed_count > 0:
             await self.put_kv_data(key, valid_ddls)
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        today_ddls = [ddl for ddl in valid_ddls if ddl.get('detected_at', '').startswith(today)]
+        today_ddls = _filter_today(valid_ddls)
+        if not today_ddls:
+            return "📭 今日暂无 DDL 记录"
 
+        return await self._format_ddl_output(event, group_id, today_ddls)
+
+    async def _query_all_groups_ddl(self, event):
+        """汇总所有监听群的 DDL（管理员专用）"""
+        groups = sorted(self.monitored_groups)
+        if not groups:
+            return "📭 暂无监听的群组"
+
+        all_lines = [f"📊 监听中 {len(groups)} 个群，今日 DDL 汇总：\n"]
+        has_any = False
+
+        for gid in groups:
+            group_mode = self.config.get("silent_group_mode", "blacklist")
+            group_list_str = self.config.get("silent_group_list", "")
+            if not _should_monitor_group(gid, group_mode, group_list_str):
+                continue
+
+            key = f"ddl_{gid}"
+            ddl_list = await self.get_kv_data(key, [])
+            now = datetime.now()
+            valid_ddls, removed_count = _clean_expired_ddls(ddl_list, now)
+            if removed_count > 0:
+                await self.put_kv_data(key, valid_ddls)
+
+            today_ddls = _filter_today(valid_ddls)
+            if not today_ddls:
+                continue
+
+            has_any = True
+            text = await self._format_ddl_output(event, gid, today_ddls)
+            all_lines.append(f"── 群 {gid} ──")
+            all_lines.append(text)
+            all_lines.append("")
+
+        if not has_any:
+            return "📭 所有监听群今日暂无 DDL 记录"
+        return "\n".join(all_lines)
+
+    async def _format_ddl_output(self, event, group_id, today_ddls):
+        """格式化单个群的 DDL 输出（文字/图片）"""
         urgent_hours = self.config.get("urgent_hours", 24)
         soon_hours = self.config.get("soon_hours", 48)
         urgent_ddls, soon_ddls, normal_ddls = categorize_ddls(today_ddls, urgent_hours, soon_hours)
 
-        output_format = group_output_format.get(group_id, self.config.get("output_format", "text"))
-
-        # LLM 总结（图片和文字模式都支持）
         if self.config.get("enable_llm_summary", True):
             for ddl in urgent_ddls + soon_ddls + normal_ddls:
                 summary = await summarize_ddl(ddl, event, self.context)
                 if summary:
                     ddl['summary'] = summary
+
+        output_format = group_output_format.get(group_id, self.config.get("output_format", "text"))
 
         if output_format == "image":
             try:
@@ -199,13 +267,10 @@ class DDLDetectPlugin(Star):
                     self, urgent_ddls, soon_ddls, normal_ddls,
                     urgent_hours, soon_hours, bg_mode, bg_value
                 )
-                yield event.image_result(url)
+                return ""  # image handled by caller
             except Exception as e:
                 logger.error(f"生成图片失败: {e}")
-                yield event.plain_result("生成图片失败，以下是文字版：\n" +
-                                         format_text_ddl(urgent_ddls, soon_ddls, normal_ddls, urgent_hours, soon_hours))
-        else:
-            yield event.plain_result(format_text_ddl(urgent_ddls, soon_ddls, normal_ddls, urgent_hours, soon_hours))
+        return format_text_ddl(urgent_ddls, soon_ddls, normal_ddls, urgent_hours, soon_hours)
 
     # ── 清除 DDL ──────────────────────────────────────────────
 
@@ -260,7 +325,6 @@ class DDLDetectPlugin(Star):
 
         output_format = group_output_format.get(group_id, self.config.get("output_format", "text"))
 
-        # LLM 总结（图片和文字模式都支持）
         if self.config.get("enable_llm_summary", True):
             for ddl in urgent_ddls + soon_ddls + normal_ddls:
                 summary = await summarize_ddl(ddl, event, self.context)

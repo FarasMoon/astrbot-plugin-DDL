@@ -87,9 +87,9 @@
     "hint": "多个群号用英文逗号分隔，如 123456,789012"
   },
   "silent_admin_sid": {
-    "description": "静默监听-管理员QQ号",
+    "description": "静默监听-管理员用户ID(跨平台)",
     "type": "string",
     "default": "",
-    "hint": "接收DDL汇总推送的QQ号，留空则不推送"
+    "hint": "管理员的平台用户标识（如QQ号/微信号），留空则不推送"
   }
 }

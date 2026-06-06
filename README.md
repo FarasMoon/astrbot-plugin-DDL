@@ -2,7 +2,7 @@
 
 <img src="logo.png" width="360" alt="AutoDDLDetect">
 
-# AutoDDLDetect
+# AstrBot Auto_DDL_Detect
 
 AstrBot 群聊 DDL 自动检测插件
 

@@ -9,7 +9,7 @@ if _plugin_dir not in sys.path:
 
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
@@ -20,81 +20,11 @@ from lib.detector import parse_keywords, build_pattern, extract_ddl
 from lib.time_parser import resolve_relative_time, parse_ddl_time
 from lib.summarizer import summarize_ddl
 from lib.renderer import categorize_ddls, format_text_ddl, render_image_card
-
-# ── 常量 ────────────────────────────────────────────────────
-
-MAX_DDL_PER_GROUP = 500  # 每群最多保留的 DDL 条数
+from lib.monitor import should_monitor_group, format_silent_msg
+from lib.storage import MAX_DDL_PER_GROUP, clean_expired_ddls, filter_today
 
 
-# ── 静默监听工具函数 ────────────────────────────────────────
-
-def _should_monitor_group(group_id: str, silent_whitelist: bool, group_list_str: str) -> bool:
-    """判断群是否应被静默监听"""
-    if not group_list_str.strip():
-        return not silent_whitelist
-    group_ids = [g.strip() for g in group_list_str.split(",") if g.strip()]
-    if silent_whitelist:
-        return group_id in group_ids
-    return group_id not in group_ids
-
-
-def _format_silent_msg(raw_ddl: dict) -> str:
-    """格式化静默监听推送消息"""
-    task = raw_ddl.get("summary") or raw_ddl.get("task", raw_ddl.get("raw_message", ""))
-    ddl_time = raw_ddl.get("ddl_time", "未知")
-    sender = raw_ddl.get("sender", "未知")
-    group_id = raw_ddl.get("group_id", "未知")
-    detected_at = raw_ddl.get("detected_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    return (
-        f"[DDL监听]\n"
-        f"群: {group_id}\n"
-        f"任务: {task}\n"
-        f"截止: {ddl_time}\n"
-        f"来自: {sender}\n"
-        f"时间: {detected_at}"
-    )
-
-
-# ── DDL 过期清理 ────────────────────────────────────────────
-
-def _clean_expired_ddls(ddl_list: list, now: datetime) -> tuple:
-    """清理已过期的 DDL（使用统一的 parse_ddl_time），返回 (有效列表, 清理数量)
-    无法解析时间的 DDL：如果已检测超过 30 天则视为过期清理"""
-    valid_ddls = []
-    removed_count = 0
-    for ddl in ddl_list:
-        ddl_time_str = ddl.get('ddl_time', '')
-        try:
-            deadline = parse_ddl_time(ddl_time_str)
-            if deadline:
-                if deadline < now:
-                    removed_count += 1
-                    continue
-                valid_ddls.append(ddl)
-                continue
-        except Exception:
-            pass
-        # 无法解析时间 → 靠检测时间兜底（30天过期）
-        detected_str = ddl.get('detected_at', '')
-        if detected_str:
-            try:
-                detected = datetime.strptime(detected_str[:10], "%Y-%m-%d")
-                if (now - detected).days > 30:
-                    removed_count += 1
-                    continue
-            except ValueError:
-                pass
-        valid_ddls.append(ddl)
-    return valid_ddls, removed_count
-
-
-def _filter_today(ddls: list) -> list:
-    """筛选今天的 DDL"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    return [ddl for ddl in ddls if ddl.get('detected_at', '').startswith(today)]
-
-
-# 切换命令的临时存储
+# ── 切换命令的临时存储 ────────────────────────────────────────
 group_output_format = {}
 
 
@@ -232,10 +162,10 @@ class DDLDetectPlugin(Star):
         if self.config.get("silent_mode", True) and self.admin_ids:
             silent_whitelist = self.config.get("silent_whitelist", False)
             group_list_str = self.config.get("silent_group_list", "")
-            if _should_monitor_group(group_id, silent_whitelist, group_list_str):
+            if should_monitor_group(group_id, silent_whitelist, group_list_str):
                 if summary:
                     raw_ddl["summary"] = summary
-                msg_text = _format_silent_msg(raw_ddl)
+                msg_text = format_silent_msg(raw_ddl)
                 from astrbot.api.star import StarTools
                 import astrbot.api.message_components as Comp
                 from astrbot.api.event import MessageChain
@@ -260,7 +190,7 @@ class DDLDetectPlugin(Star):
             ddl_list = await self.get_kv_data(key, [])
             # 保存前清理过期
             now = datetime.now()
-            ddl_list, removed = _clean_expired_ddls(ddl_list, now)
+            ddl_list, removed = clean_expired_ddls(ddl_list, now)
             ddl_list.append(ddl_data)
             # 每群最多保留 MAX_DDL_PER_GROUP 条
             if len(ddl_list) > MAX_DDL_PER_GROUP:
@@ -330,11 +260,11 @@ class DDLDetectPlugin(Star):
         """查询并格式化单个群的 DDL"""
         ddl_list = await self.get_kv_data(key, [])
         now = datetime.now()
-        valid_ddls, removed_count = _clean_expired_ddls(ddl_list, now)
+        valid_ddls, removed_count = clean_expired_ddls(ddl_list, now)
         if removed_count > 0:
             await self.put_kv_data(key, valid_ddls)
 
-        today_ddls = _filter_today(valid_ddls)
+        today_ddls = filter_today(valid_ddls)
         if not today_ddls:
             return "📭 今日暂无 DDL 记录"
 
@@ -351,17 +281,17 @@ class DDLDetectPlugin(Star):
         all_today_ddls = []
 
         for gid in groups:
-            if not _should_monitor_group(gid, silent_whitelist, group_list_str):
+            if not should_monitor_group(gid, silent_whitelist, group_list_str):
                 continue
 
             key = f"ddl_{gid}"
             ddl_list = await self.get_kv_data(key, [])
             now = datetime.now()
-            valid_ddls, removed_count = _clean_expired_ddls(ddl_list, now)
+            valid_ddls, removed_count = clean_expired_ddls(ddl_list, now)
             if removed_count > 0:
                 await self.put_kv_data(key, valid_ddls)
 
-            today_ddls = _filter_today(valid_ddls)
+            today_ddls = filter_today(valid_ddls)
             for ddl in today_ddls:
                 ddl["group_id"] = gid
             all_today_ddls.extend(today_ddls)
@@ -650,12 +580,12 @@ class DDLDetectPlugin(Star):
         for gid in list(self.monitored_groups):
             silent_whitelist = self.config.get("silent_whitelist", False)
             group_list_str = self.config.get("silent_group_list", "")
-            if not _should_monitor_group(gid, silent_whitelist, group_list_str):
+            if not should_monitor_group(gid, silent_whitelist, group_list_str):
                 continue
 
             key = f"ddl_{gid}"
             ddl_list = await self.get_kv_data(key, [])
-            valid_ddls, _ = _clean_expired_ddls(ddl_list, now)
+            valid_ddls, _ = clean_expired_ddls(ddl_list, now)
 
             for ddl in valid_ddls:
                 total_checked += 1

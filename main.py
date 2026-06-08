@@ -145,6 +145,12 @@ class DDLDetectPlugin(Star):
         sender_name = event.get_sender_name()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # 过滤已过期的 DDL（截止日早于当前时间）
+        deadline_dt = parse_ddl_time(ddl_time)
+        if deadline_dt and deadline_dt < datetime.now():
+            logger.info(f"DDL 已过期，跳过: {ddl_time}")
+            return
+
         raw_ddl = {
             "task": task_desc,
             "raw_message": message_str,
@@ -558,14 +564,20 @@ class DDLDetectPlugin(Star):
             lines.append("  → 仅正则模式，跳过 LLM 验证")
         lines.append("")
 
-        # Step 4: 最终解析
-        lines.append("【4】最终解析")
+        # Step 4: 过期检查
+        lines.append("【4】过期检查")
         parsed = parse_ddl_time(ddl_time)
         lines.append(f"  parse_ddl_time('{ddl_time}') → {parsed}")
         if parsed:
             import datetime as _dt
-            remaining = (parsed - _dt.datetime.now()).total_seconds() / 3600
-            lines.append(f"  剩余时间: {remaining:.1f} 小时")
+            now_dt = _dt.datetime.now()
+            if parsed < now_dt:
+                lines.append(f"  ⚠️ 截止时间已过！({parsed} < {now_dt})")
+                lines.append(f"  → 该 DDL 在正常流程中会被跳过，不保存/不回复")
+                yield event.plain_result("\n".join(lines))
+                return
+            remaining = (parsed - now_dt).total_seconds() / 3600
+            lines.append(f"  ✅ 未过期，剩余: {remaining:.1f} 小时")
         lines.append("")
 
         # Step 5: LLM 总结测试（实际调用并展示 prompt + 响应）

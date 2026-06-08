@@ -245,33 +245,33 @@ class DDLDetectPlugin(Star):
         # 私聊：检查是否为管理员
         if not group_id:
             if self._is_admin(event):
-                result = await self._query_all_groups_ddl(event)
-                if isinstance(result, tuple):
-                    mode, content = result
-                    if mode == "image":
-                        yield event.image_result(content)
-                    else:
-                        yield event.plain_result(content)
+                results = await self._query_all_groups_ddl(event)
+                if isinstance(results, list):
+                    for mode, content in results:
+                        if mode == "image":
+                            yield event.image_result(content)
+                        else:
+                            yield event.plain_result(content)
                 else:
-                    yield event.plain_result(result)
+                    yield event.plain_result(results)
                 return
             yield event.plain_result("📭 私聊仅管理员(silent_admin_sid)可查看汇总")
             return
 
         # 群聊：查本群 DDL
         key = f"ddl_{group_id}"
-        result = await self._query_single_group(event, group_id, key)
-        if isinstance(result, tuple):
-            mode, content = result
-            if mode == "image":
-                yield event.image_result(content)
-            else:
-                yield event.plain_result(content)
+        results = await self._query_single_group(event, group_id, key)
+        if isinstance(results, list):
+            for mode, content in results:
+                if mode == "image":
+                    yield event.image_result(content)
+                else:
+                    yield event.plain_result(content)
         else:
-            yield event.plain_result(result)
+            yield event.plain_result(results)
 
     async def _query_single_group(self, event, group_id, key):
-        """查询并格式化单个群的 DDL"""
+        """查询并格式化单个群的 DDL，返回 list[tuple] 或 str"""
         ddl_list = await self.get_kv_data(key, [])
         now = datetime.now()
         valid_ddls, removed_count = clean_expired_ddls(ddl_list, now)
@@ -285,7 +285,7 @@ class DDLDetectPlugin(Star):
         return await self._format_ddl_output(event, group_id, today_ddls)
 
     async def _query_all_groups_ddl(self, event):
-        """汇总所有监听群的 DDL（管理员专用），归并到一张卡片"""
+        """汇总所有监听群的 DDL（管理员专用），归并到一张卡片。返回 list[tuple] 或 str"""
         groups = sorted(self.monitored_groups)
         if not groups:
             return "📭 暂无监听的群组"
@@ -318,10 +318,11 @@ class DDLDetectPlugin(Star):
         return await self._format_ddl_output(event, merged_id, all_today_ddls)
 
     async def _format_ddl_output(self, event, group_id, today_ddls):
-        """格式化 DDL 输出，返回 (type, content)。summary 不回存（已由 on_group_message 缓存）"""
+        """格式化 DDL 输出，返回 list[(type, content)]。图片模式先返回渲染提示"""
         urgent_hours = self.config.get("urgent_hours", 24)
         soon_hours = self.config.get("soon_hours", 48)
         urgent_ddls, soon_ddls, normal_ddls = categorize_ddls(today_ddls, urgent_hours, soon_hours)
+        gen_time = datetime.now().strftime("%H:%M:%S")
 
         if self.config.get("enable_llm_summary", True):
             # 收集需要总结的 DDL → 批量 LLM → 按 group 回存
@@ -369,13 +370,16 @@ class DDLDetectPlugin(Star):
                 url = await render_image_card(
                     self, urgent_ddls, soon_ddls, normal_ddls,
                     urgent_hours, soon_hours, bg_mode, bg_value,
-                    source_info=source_info
+                    source_info=source_info, gen_time=gen_time
                 )
-                return ("image", url)
+                return [
+                    ("text", f"🎨 正在渲染图片（{gen_time}），请稍候..."),
+                    ("image", url),
+                ]
             except Exception as e:
                 logger.error(f"生成图片失败: {e}")
-        return ("text", format_text_ddl(urgent_ddls, soon_ddls, normal_ddls,
-                                         urgent_hours, soon_hours, source_info))
+        return [("text", format_text_ddl(urgent_ddls, soon_ddls, normal_ddls,
+                                         urgent_hours, soon_hours, source_info) + f"\n\n🕐 {gen_time}")]
 
     # ── 清除 DDL ──────────────────────────────────────────────
 

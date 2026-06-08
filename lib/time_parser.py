@@ -47,12 +47,20 @@ def resolve_relative_time(matched_time: str) -> str:
 
 
 def parse_ddl_time(time_str: str) -> Optional[datetime]:
-    """解析 DDL 时间字符串为 datetime 对象"""
+    """解析 DDL 时间字符串为 datetime 对象，自动修正跨年"""
     if not time_str:
         return None
 
     now = datetime.now()
     year = now.year
+
+    def _correct_year(dt: datetime) -> datetime:
+        """如果解析结果已过去超过 180 天，尝试下一年；如果超过 180 天后，可能是下一年边缘"""
+        diff_days = (dt - now).days
+        if diff_days < -180:
+            # 已过去很久 → 很可能是下一年
+            return dt.replace(year=year + 1)
+        return dt
 
     try:
         formats = [
@@ -74,7 +82,7 @@ def parse_ddl_time(time_str: str) -> Optional[datetime]:
                 dt = datetime.strptime(time_str, fmt)
                 if dt.year == 1900:
                     dt = dt.replace(year=year)
-                return dt
+                return _correct_year(dt)
             except ValueError:
                 continue
 

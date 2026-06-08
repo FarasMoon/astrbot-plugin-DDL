@@ -45,6 +45,6 @@ def extract_ddl(message: str, pattern: re.Pattern, resolve_time_func) -> Optiona
     if not task_desc:
         task_desc = message.replace(time_part, "").strip()
     if not task_desc:
-        task_desc = message.strip()
+        task_desc = "未命名任务"
 
     return task_desc, time_part

@@ -58,19 +58,33 @@ def _format_silent_msg(raw_ddl: dict) -> str:
 # ── DDL 过期清理 ────────────────────────────────────────────
 
 def _clean_expired_ddls(ddl_list: list, now: datetime) -> tuple:
-    """清理已过期的 DDL（使用统一的 parse_ddl_time），返回 (有效列表, 清理数量)"""
+    """清理已过期的 DDL（使用统一的 parse_ddl_time），返回 (有效列表, 清理数量)
+    无法解析时间的 DDL：如果已检测超过 30 天则视为过期清理"""
     valid_ddls = []
     removed_count = 0
     for ddl in ddl_list:
         ddl_time_str = ddl.get('ddl_time', '')
         try:
             deadline = parse_ddl_time(ddl_time_str)
-            if deadline and deadline < now:
-                removed_count += 1
-            else:
+            if deadline:
+                if deadline < now:
+                    removed_count += 1
+                    continue
                 valid_ddls.append(ddl)
+                continue
         except Exception:
-            valid_ddls.append(ddl)
+            pass
+        # 无法解析时间 → 靠检测时间兜底（30天过期）
+        detected_str = ddl.get('detected_at', '')
+        if detected_str:
+            try:
+                detected = datetime.strptime(detected_str[:10], "%Y-%m-%d")
+                if (now - detected).days > 30:
+                    removed_count += 1
+                    continue
+            except ValueError:
+                pass
+        valid_ddls.append(ddl)
     return valid_ddls, removed_count
 
 
@@ -98,6 +112,7 @@ class DDLDetectPlugin(Star):
         self.admin_ids: list = []
         self._seen_messages: set = set()  # (group_id, message_id) 去重
         self._msg_lock = asyncio.Lock()   # 保护 _seen_messages 并发
+        self._summary_locks: dict = {}    # per-group 锁，防 summary 写回竞态
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查消息发送者是否为管理员"""
@@ -115,11 +130,18 @@ class DDLDetectPlugin(Star):
         self.admin_ids = [a.strip() for a in admin_str.split(",") if a.strip()]
         # 群名映射
         self._group_names = self._load_group_names()
-        # 截止提醒追踪
-        self._reminded_ddls: set = set()
+        # 截止提醒追踪（从 KV 恢复以跨重启持久化）
+        stored = await self.get_kv_data("__reminded_ddls", [])
+        self._reminded_ddls: set = set(tuple(x) for x in stored) if stored else set()
         # 启动截止前提醒后台任务
         self._reminder_task = asyncio.ensure_future(self._deadline_reminder_loop())
         logger.info(f"AutoDDLDetect 已加载，关键词: {self.keywords}，通知时间: {self.notification_times}，管理员: {self.admin_ids}")
+
+    def _get_summary_lock(self, group_id: str) -> asyncio.Lock:
+        """获取 per-group 锁（懒创建）"""
+        if group_id not in self._summary_locks:
+            self._summary_locks[group_id] = asyncio.Lock()
+        return self._summary_locks[group_id]
 
     def _load_group_names(self) -> dict:
         raw = self.config.get("group_display", "")
@@ -231,27 +253,36 @@ class DDLDetectPlugin(Star):
     # ── 存储 ──────────────────────────────────────────────────
 
     async def _save_ddl(self, group_id: str, ddl_data: dict) -> None:
-        """保存 DDL（含 KV 上限保护）"""
+        """保存 DDL（保存前清理过期 + KV 上限保护）"""
         key = f"ddl_{group_id}"
-        ddl_list = await self.get_kv_data(key, [])
-        ddl_list.append(ddl_data)
-        # 每群最多保留 MAX_DDL_PER_GROUP 条
-        if len(ddl_list) > MAX_DDL_PER_GROUP:
-            ddl_list = ddl_list[-MAX_DDL_PER_GROUP:]
-        await self.put_kv_data(key, ddl_list)
+        lock = self._get_summary_lock(group_id)
+        async with lock:
+            ddl_list = await self.get_kv_data(key, [])
+            # 保存前清理过期
+            now = datetime.now()
+            ddl_list, removed = _clean_expired_ddls(ddl_list, now)
+            ddl_list.append(ddl_data)
+            # 每群最多保留 MAX_DDL_PER_GROUP 条
+            if len(ddl_list) > MAX_DDL_PER_GROUP:
+                ddl_list = ddl_list[-MAX_DDL_PER_GROUP:]
+            await self.put_kv_data(key, ddl_list)
 
     async def _summarize_ddl_cached(self, group_id: str, raw_ddl: dict,
-                                     event) -> Optional[str]:
-        """带缓存的 LLM 总结：已有 summary 则跳过，否则调 LLM 并回存 KV"""
+                                     event) -> str | None:
+        """带缓存的 LLM 总结：已有 summary 则跳过，否则调 LLM 并回存 KV（加锁防竞态）"""
         if raw_ddl.get("summary"):
             return raw_ddl["summary"]
         if not self.config.get("enable_llm_summary", True):
             return None
         summary = await summarize_ddl(raw_ddl, event, self.context)
-        if summary:
-            raw_ddl["summary"] = summary
-            # 回存到 KV，让以后的查询复用
-            key = f"ddl_{group_id}"
+        if not summary:
+            return None
+
+        raw_ddl["summary"] = summary
+        # 回存到 KV（加锁保证并发安全）
+        key = f"ddl_{group_id}"
+        lock = self._get_summary_lock(group_id)
+        async with lock:
             ddl_list = await self.get_kv_data(key, [])
             for ddl in ddl_list:
                 if ddl.get("message_id") == raw_ddl.get("message_id"):
@@ -343,19 +374,41 @@ class DDLDetectPlugin(Star):
         return await self._format_ddl_output(event, merged_id, all_today_ddls)
 
     async def _format_ddl_output(self, event, group_id, today_ddls):
-        """格式化单个群的 DDL 输出，返回 (type, content)"""
+        """格式化 DDL 输出，返回 (type, content)。summary 不回存（已由 on_group_message 缓存）"""
         urgent_hours = self.config.get("urgent_hours", 24)
         soon_hours = self.config.get("soon_hours", 48)
         urgent_ddls, soon_ddls, normal_ddls = categorize_ddls(today_ddls, urgent_hours, soon_hours)
 
         if self.config.get("enable_llm_summary", True):
-            for ddl in urgent_ddls + soon_ddls + normal_ddls:
-                # 已有缓存的 summary 不再调 LLM
-                if ddl.get("summary"):
-                    continue
-                summary = await summarize_ddl(ddl, event, self.context)
-                if summary:
-                    ddl['summary'] = summary
+            # 收集需要总结的 DDL → 批量 LLM → 按 group 回存
+            to_summarize = [(idx, ddl) for idx, ddl
+                            in enumerate(urgent_ddls + soon_ddls + normal_ddls)
+                            if not ddl.get("summary")]
+            # 按 group 分组（仅对 admin_all_groups 场景）
+            by_group: dict[str, list] = {}
+            for _, ddl in to_summarize:
+                gid = ddl.get("group_id", "unknown")
+                by_group.setdefault(gid, []).append(ddl)
+
+            for gid, ddls in by_group.items():
+                for ddl in ddls:
+                    summary = await summarize_ddl(ddl, event, self.context)
+                    if summary:
+                        ddl['summary'] = summary
+                # 回存到 KV
+                if ddls:
+                    key = f"ddl_{gid}"
+                    lock = self._get_summary_lock(gid)
+                    async with lock:
+                        ddl_list = await self.get_kv_data(key, [])
+                        for ddl_in_list in ddl_list:
+                            mid = ddl_in_list.get("message_id")
+                            for d in ddls:
+                                if d.get("message_id") == mid:
+                                    if d.get("summary"):
+                                        ddl_in_list["summary"] = d["summary"]
+                                    break
+                        await self.put_kv_data(key, ddl_list)
 
         output_format = group_output_format.get(
             group_id,
@@ -471,6 +524,8 @@ class DDLDetectPlugin(Star):
 
         if self.config.get("enable_llm_summary", True):
             for ddl in urgent_ddls + soon_ddls + normal_ddls:
+                if ddl.get("summary"):
+                    continue
                 summary = await summarize_ddl(ddl, event, self.context)
                 if summary:
                     ddl['summary'] = summary
@@ -504,9 +559,7 @@ class DDLDetectPlugin(Star):
             yield event.plain_result("📭 暂无监听的群组")
             return
 
-        # 临时清空去重集，允许再次提醒
-        self._reminded_ddls.clear()
-
+        # force 模式直接跳过去重，不影响后台循环的 _reminded_ddls
         persona_id = self.config.get("deadline_remind_persona", "")
         persona_note = f"（人格: {persona_id}）" if persona_id else "（使用默认人格）"
         yield event.plain_result(f"🔄 强制触发提醒{persona_note}，开始生成...")
@@ -581,8 +634,8 @@ class DDLDetectPlugin(Star):
             await asyncio.sleep(300)  # 每 5 分钟检查一次
 
     async def _check_deadline_reminders(self, remind_hours: float, force: bool = False):
-        """检查所有监听群的 DDL，提醒即将截止的。force=True 时忽略时间窗口，强制发送第一条。
-        返回 (发送数, 总数, 过滤数)"""
+        """检查所有监听群的 DDL，提醒即将截止的。force=True 时忽略时间窗口和去重，仅取第一条。
+        返回 (发送数, 检查数, 不在窗口数, 解析失败数)"""
         from astrbot.api.star import StarTools
         import astrbot.api.message_components as Comp
         from astrbot.api.event import MessageChain
@@ -590,8 +643,9 @@ class DDLDetectPlugin(Star):
         now = datetime.now()
         notified_count = 0
         total_checked = 0
-        skipped_time = 0
+        in_window = 0
         skipped_parse = 0
+        sent_dedup_keys = []  # 本次发送的去重 key，批量持久化
 
         for gid in list(self.monitored_groups):
             silent_whitelist = self.config.get("silent_whitelist", False)
@@ -608,7 +662,7 @@ class DDLDetectPlugin(Star):
                 ddl_time_str = ddl.get('ddl_time', '')
 
                 if force:
-                    # 强制模式：跳过时间窗口和去重，仅取第一条有效 DDL
+                    # 强制模式：跳过时间窗口和去重，仅取第一条
                     if notified_count >= 1:
                         continue
                 else:
@@ -619,17 +673,29 @@ class DDLDetectPlugin(Star):
 
                     remaining = (deadline - now).total_seconds() / 3600
                     if remaining < 0 or remaining > remind_hours:
-                        skipped_time += 1
                         continue
+                    in_window += 1
 
                     # 去重
                     dedup_key = (gid, ddl.get('detected_at', ''), ddl_time_str)
                     if dedup_key in self._reminded_ddls:
                         continue
                     self._reminded_ddls.add(dedup_key)
+                    sent_dedup_keys.append(dedup_key)
+                    deadline = deadline  # already computed
+                    remaining = remaining
 
-                deadline = parse_ddl_time(ddl_time_str) if force else deadline
-                remaining = max(0, ((deadline - now).total_seconds() / 3600) if deadline else 0)
+                if force:
+                    deadline = parse_ddl_time(ddl_time_str)
+                    remaining = 0.0
+                    if deadline:
+                        remaining = (deadline - now).total_seconds() / 3600
+
+                if not deadline and force:
+                    skipped_parse += 1
+                    continue
+
+                remaining = max(0, remaining)
 
                 # 构建提醒
                 group_label = self._get_group_label(gid)
@@ -699,12 +765,22 @@ class DDLDetectPlugin(Star):
                     except Exception as e:
                         logger.warning(f"[DeadlineReminder] 发送失败: {e}")
 
+        # 持久化去重集
+        if sent_dedup_keys:
+            await self._persist_reminded_ddls()
+
         if notified_count > 0:
             logger.info(f"[DeadlineReminder] 已推送 {notified_count} 条截止提醒")
         else:
-            logger.info(f"[DeadlineReminder] 检查 {total_checked} 条 DDL，均不在截止窗口内（解析失败 {skipped_parse}，时间不匹配 {skipped_time}）")
+            reason = f"解析失败 {skipped_parse}" if not force else ""
+            logger.info(f"[DeadlineReminder] 检查 {total_checked} 条 DDL，窗口内 {in_window} 条，均无新提醒，{reason}")
 
-        return (notified_count, total_checked, skipped_time, skipped_parse)
+        return (notified_count, total_checked, 0, skipped_parse)
+
+    async def _persist_reminded_ddls(self):
+        """将 _reminded_ddls 持久化到 KV（最多保留最近 500 条）"""
+        data = list(self._reminded_ddls)[-500:]
+        await self.put_kv_data("__reminded_ddls", data)
 
     async def _get_persona_prompt(self) -> str:
         """获取截止提醒人格提示词"""

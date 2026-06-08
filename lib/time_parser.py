@@ -10,7 +10,7 @@ def resolve_relative_time(matched_time: str) -> str:
     now = datetime.now()
 
     if re.match(r'\d{1,2}月\d{1,2}[日号]?', matched_time) or re.match(r'\d{1,2}[/-]\d{1,2}', matched_time):
-        return matched_time
+        return re.sub(r'[（(][^）)]*[）)]', '', matched_time).strip()
 
     if matched_time in ["今天", "明天", "今晚", "明晚"]:
         if matched_time in ["明天", "明晚"]:

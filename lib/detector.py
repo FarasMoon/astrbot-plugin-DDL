@@ -3,7 +3,19 @@
 import re
 from typing import Optional, Tuple
 
-DEFAULT_KEYWORDS = ["截止", "截止时间", "截止日期", "deadline", "ddl", "交作业"]
+DEFAULT_KEYWORDS = ["截止", "截止时间", "截止日期", "deadline", "ddl", "交作业", "前"]
+
+# 单独编译时间正则，用于 extract_ddl 从匹配文本中提取时间部分
+_TIME_PATTERNS = [
+    r"\d{1,2}月\d{1,2}[日号]?(?:.*?[0-2]?\d(?:[:：点时])\d{1,2}(?:分?)?)?",
+    r"\d{1,2}[/-]\d{1,2}(?!\d)",
+    r"\d{4}年\d{1,2}月\d{1,2}[日号]?",
+    r"今天|明天|今晚|明晚(?:\s*[0-2]?\d(?:[:：点时])\d{1,2}(?:分?)?)?",
+    r"(?:本周|下周)?[一二三四五六日天](?:[早晚]上?\s*[0-2]?\d(?:[:：点时])\d{1,2}(?:分?)?)?",
+    r"[早中晚]上?\s*[0-2]?\d(?:[:：点时])\d{1,2}(?:分?)?",
+    r"\d{1,2}(?:[:：点时])\d{1,2}(?:分)?",
+]
+_TIME_RE = re.compile("(" + "|".join(_TIME_PATTERNS) + ")")
 
 
 def parse_keywords(keywords_str: str) -> list:
@@ -18,7 +30,7 @@ def build_pattern(keywords: list) -> re.Pattern:
     keyword_pattern = "|".join(re.escape(k) for k in keywords)
 
     time_patterns = [
-        r"(\d{1,2}月\d{1,2}[日号]?(?:\s*[0-2]?\d(?:[:：点时])\d{1,2}(?:分?)?)?)",
+        r"(\d{1,2}月\d{1,2}[日号]?(?:.*?[0-2]?\d(?:[:：点时])\d{1,2}(?:分?)?)?)",
         r"(\d{1,2}[/-]\d{1,2})(?!\d)",
         r"(\d{4}年\d{1,2}月\d{1,2}[日号]?)",
         r"(今天|明天|今晚|明晚)(?:\s*[0-2]?\d(?:[:：点时])\d{1,2}(?:分?)?)?",
@@ -38,8 +50,12 @@ def extract_ddl(message: str, pattern: re.Pattern, resolve_time_func) -> Optiona
     if not match:
         return None
 
-    time_part = match.group(3) or match.group(4)
-    time_part = resolve_time_func(time_part)
+    full_match = match.group(0)
+    # 从完整匹配中重新提取时间（避免嵌套捕获组的 group 编号问题）
+    tm = _TIME_RE.search(full_match)
+    if not tm:
+        return None
+    time_part = resolve_time_func(tm.group(0))
 
     task_desc = message[:match.start()].strip() + message[match.end():].strip()
     if not task_desc:

@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 
-from lib.detector import parse_keywords, build_pattern, extract_ddl
+from lib.detector import parse_keywords, build_pattern, extract_ddl, classify_ddl
 from lib.time_parser import resolve_relative_time, parse_ddl_time
 from lib.summarizer import summarize_ddl
 from lib.renderer import categorize_ddls, format_text_ddl, render_image_card
@@ -130,9 +130,21 @@ class DDLDetectPlugin(Star):
             if dedup_key in self._seen_messages:
                 return
             self._seen_messages.add(dedup_key)
-            # 限制内存占用
             if len(self._seen_messages) > 10000:
                 self._seen_messages.clear()
+
+        # 正则+LLM 模式：语义验证过滤误报
+        if self.config.get("ddl_detect_mode", "regex") == "regex_llm":
+            provider_id = self.config.get("ddl_llm_provider", "") or None
+            verified = await classify_ddl(message_str, event, self.context, provider_id)
+            if verified is False:
+                return  # LLM 明确判断不是 DDL，跳过
+            if verified is not None:
+                # LLM 返回了更精准的 task/ddl_time
+                task_desc = verified["task"] or task_desc
+                ddl_time = verified["ddl_time"] or ddl_time
+                if verified["ddl_time"]:
+                    ddl_time = resolve_relative_time(verified["ddl_time"])
 
         sender_name = event.get_sender_name()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

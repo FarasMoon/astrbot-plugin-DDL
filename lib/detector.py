@@ -1,7 +1,10 @@
-"""DDL 检测模块：正则匹配 + 提取"""
+"""DDL 检测模块：正则匹配 + LLM 语义验证"""
 
+import json
 import re
 from typing import Optional, Tuple
+
+from astrbot.api import logger
 
 DEFAULT_KEYWORDS = ["截止", "截止时间", "截止日期", "deadline", "ddl", "交作业", "前"]
 
@@ -16,6 +19,22 @@ _TIME_PATTERNS = [
     r"\d{1,2}(?:[:：点时])\d{1,2}(?:分)?",
 ]
 _TIME_RE = re.compile("(" + "|".join(_TIME_PATTERNS) + ")")
+
+# LLM 分类 prompt
+_CLASSIFY_PROMPT = """判断以下群聊消息是否包含一个DDL（截止/限期）任务。不要被"截止"等词语误导——如果是讨论"截止报名"、"截止日期已过"、"生日截止"等非DDL场景，应判定为否。
+
+## 判断标准
+- 是DDL：明确给出了任务+时间，且有催促完成的意图（如"请于...前提交"、"最晚...完成"、"ddl是..."）
+- 不是DDL：闲聊中提到时间（"周一到期了"）、讨论过去的截止（"昨天截止的"）、只有日期没有任务
+
+## 如果是DDL
+提取任务描述和截止时间，以JSON返回：
+{"is_ddl": true, "task": "简要任务描述", "ddl_time": "原始时间文本"}
+
+## 如果不是DDL
+{"is_ddl": false}
+
+只返回JSON，不要其他文字。消息："""
 
 
 def parse_keywords(keywords_str: str) -> list:
@@ -64,3 +83,52 @@ def extract_ddl(message: str, pattern: re.Pattern, resolve_time_func) -> Optiona
         task_desc = "未命名任务"
 
     return task_desc, time_part
+
+
+async def classify_ddl(message: str, event, context, provider_id: str | None = None) -> dict | bool | None:
+    """LLM 语义验证：判断正则命中的消息是否真的是 DDL。
+
+    返回值：
+    - {"task": ..., "ddl_time": ...}  → 确认是DDL，使用此结果
+    - False                           → 明确不是DDL（误报），跳过
+    - None                            → LLM 不可用/异常，放行（使用正
+则结果）
+    """
+    try:
+        if not provider_id:
+            provider_id = await context.get_current_chat_provider_id(
+                umo=event.unified_msg_origin
+            )
+        if not provider_id:
+            logger.warning("DDL语义验证：未找到可用的LLM")
+            return None  # 无LLM可用时放行（不拦截）
+
+        llm_resp = await context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=_CLASSIFY_PROMPT + message,
+        )
+        if not llm_resp or not llm_resp.completion_text:
+            logger.warning("DDL语义验证：模型返回为空")
+            return None
+
+        raw = llm_resp.completion_text.strip()
+        # 清洗可能的 markdown 代码块包裹
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        result = json.loads(raw)
+        if not isinstance(result, dict):
+            return None
+        if result.get("is_ddl"):
+            return {
+                "task": result.get("task", ""),
+                "ddl_time": result.get("ddl_time", ""),
+            }
+        # is_ddl = false → 明确不是DDL，过滤掉
+        logger.info(f"DDL语义验证：判断为非DDL（误报过滤）")
+        return False
+    except json.JSONDecodeError:
+        logger.info(f"DDL语义验证：非JSON返回（放行）: {raw[:80]}")
+        return None  # parse失败放行，避免拦截正常DDL
+    except Exception as e:
+        logger.warning(f"DDL语义验证失败（放行）: {e}")
+        return None

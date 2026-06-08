@@ -20,8 +20,8 @@ _TIME_PATTERNS = [
 ]
 _TIME_RE = re.compile("(" + "|".join(_TIME_PATTERNS) + ")")
 
-# LLM 分类 prompt
-_CLASSIFY_PROMPT = """判断以下群聊消息是否包含一个DDL（截止/限期）任务。不要被"截止"等词语误导——如果是讨论"截止报名"、"截止日期已过"、"生日截止"等非DDL场景，应判定为否。
+# LLM 分类 prompt（供调试命令展示）
+CLASSIFY_PROMPT = """判断以下群聊消息是否包含一个DDL（截止/限期）任务。不要被"截止"等词语误导——如果是讨论"截止报名"、"截止日期已过"、"生日截止"等非DDL场景，应判定为否。
 
 ## 判断标准
 - 是DDL：明确给出了任务+时间，且有催促完成的意图（如"请于...前提交"、"最晚...完成"、"ddl是..."）
@@ -105,7 +105,7 @@ async def classify_ddl(message: str, event, context, provider_id: str | None = N
 
         llm_resp = await context.llm_generate(
             chat_provider_id=provider_id,
-            prompt=_CLASSIFY_PROMPT + message,
+            prompt=CLASSIFY_PROMPT + message,
         )
         if not llm_resp or not llm_resp.completion_text:
             logger.warning("DDL语义验证：模型返回为空")

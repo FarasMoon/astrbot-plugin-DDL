@@ -133,5 +133,11 @@
     "default": "",
     "_special": "select_persona",
     "hint": "留空使用默认人格；选择后 LLM 将按该人格风格生成提醒文案"
+  },
+  "debug_mode": {
+    "description": "调试模式（管理员可用 /ddl_debug 命令测试任意消息）",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后 /ddl_debug <消息> 可逐步追踪 DDL 检测全过程"
   }
 }

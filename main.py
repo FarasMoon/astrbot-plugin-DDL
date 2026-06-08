@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 
-from lib.detector import parse_keywords, build_pattern, extract_ddl, classify_ddl
+from lib.detector import parse_keywords, build_pattern, extract_ddl, classify_ddl, CLASSIFY_PROMPT
 from lib.time_parser import resolve_relative_time, parse_ddl_time
 from lib.summarizer import summarize_ddl
 from lib.renderer import categorize_ddls, format_text_ddl, render_image_card
@@ -514,6 +514,144 @@ class DDLDetectPlugin(Star):
                 f"⚠️ 未发送任何提醒（共检查 {total} 条 DDL，"
                 f"解析失败 {skip_p} 条）"
             )
+
+    @filter.command("ddl_debug")
+    async def debug_ddl(self, event: AstrMessageEvent) -> MessageEventResult:
+        """调试模式：逐步追踪 DDL 检测全过程（仅管理员）"""
+        if not self._is_admin(event):
+            yield event.plain_result("❌ 仅管理员可用 /ddl_debug")
+            return
+        if not self.config.get("debug_mode", False):
+            yield event.plain_result("⚠️ 调试模式未开启，请在设置中启用 debug_mode")
+            return
+
+        # 获取测试消息
+        test_msg = event.message_str.strip()
+        prefix = "/ddl_debug"
+        if test_msg.startswith(prefix):
+            test_msg = test_msg[len(prefix):].strip()
+        if not test_msg:
+            yield event.plain_result("用法: /ddl_debug <测试消息>")
+            return
+
+        lines = ["🔍 DDL 调试追踪", "─" * 30, f"📝 输入: {test_msg}", ""]
+
+        # Step 1: 关键词 + 正则
+        lines.append("【1】关键词 → 正则模式")
+        lines.append(f"  关键词: {self.keywords}")
+        lines.append(f"  正则: {self.ddl_pattern.pattern[:120]}...")
+        lines.append("")
+
+        # Step 2: 正则匹配
+        ddl_info = extract_ddl(test_msg, self.ddl_pattern, resolve_relative_time)
+        if not ddl_info:
+            lines.append("【2】正则匹配 ❌ 未命中")
+            lines.append("  检测结束：正则未匹配到 DDL 格式")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        task_desc, ddl_time = ddl_info
+        lines.append("【2】正则匹配 ✅ 命中")
+        lines.append(f"  匹配文本: {self.ddl_pattern.search(test_msg).group(0) if self.ddl_pattern.search(test_msg) else '?'}")
+        lines.append(f"  提取 task: {task_desc[:60]}{'...' if len(task_desc) > 60 else ''}")
+        lines.append(f"  提取 time: {ddl_time}")
+        lines.append(f"  resolve_relative_time: {ddl_time} → {resolve_relative_time(ddl_time) if ddl_time else '?'}")
+        lines.append("")
+
+        # Step 3: LLM 语义验证（如果开启）
+        detect_mode = self.config.get("ddl_detect_mode", "regex")
+        lines.append(f"【3】检测模式: {detect_mode}")
+
+        if detect_mode == "regex_llm":
+            provider_id = self.config.get("ddl_llm_provider", "") or None
+            lines.append("")
+            lines.append("【3a】LLM 语义验证 - 发送 prompt:")
+            prompt_text = CLASSIFY_PROMPT + test_msg
+            # 截断过长 prompt
+            if len(prompt_text) > 300:
+                lines.append(f"  {prompt_text[:150]}")
+                lines.append(f"  ...(省略 {len(prompt_text) - 300} 字)...")
+                lines.append(f"  ...{prompt_text[-150:]}")
+            else:
+                for line in prompt_text.split("\n"):
+                    lines.append(f"  {line}")
+            lines.append("")
+
+            try:
+                if not provider_id:
+                    umo = event.unified_msg_origin
+                    provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+                if not provider_id:
+                    lines.append("【3b】LLM 响应: ❌ 未找到可用的 LLM 模型")
+                    lines.append("  → 检测结果: 放行（使用正则结果）")
+                else:
+                    lines.append(f"【3b】使用模型: {provider_id}")
+                    llm_resp = await self.context.llm_generate(
+                        chat_provider_id=provider_id,
+                        prompt=CLASSIFY_PROMPT + test_msg,
+                    )
+                    if not llm_resp or not llm_resp.completion_text:
+                        lines.append("【3c】LLM 响应: ❌ 空响应")
+                        lines.append("  → 检测结果: 放行（使用正则结果）")
+                    else:
+                        raw = llm_resp.completion_text.strip()
+                        lines.append(f"【3c】LLM 原始响应: {raw}")
+                        # 解析
+                        import json as _json
+                        clean = raw
+                        if clean.startswith("```"):
+                            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                        try:
+                            result = _json.loads(clean)
+                            if result.get("is_ddl"):
+                                lines.append(f"【3d】解析结果: ✅ 是 DDL")
+                                lines.append(f"  LLM task: {result.get('task', '?')}")
+                                lines.append(f"  LLM time: {result.get('ddl_time', '?')}")
+                                # Apply LLM correction
+                                if result.get("task"):
+                                    task_desc = result["task"]
+                                if result.get("ddl_time"):
+                                    ddl_time = resolve_relative_time(result["ddl_time"])
+                            else:
+                                lines.append(f"【3d】解析结果: ❌ 不是 DDL（误报过滤）")
+                                lines.append("  → 检测结束：LLM 判定为误报，不触发")
+                                yield event.plain_result("\n".join(lines))
+                                return
+                        except _json.JSONDecodeError:
+                            lines.append(f"【3d】解析结果: ⚠️ JSON 解析失败，放行")
+            except Exception as e:
+                lines.append(f"【3】LLM 调用异常: {e}")
+                lines.append("  → 检测结果: 放行（使用正则结果）")
+        else:
+            lines.append("  → 仅正则模式，跳过 LLM 验证")
+        lines.append("")
+
+        # Step 4: 最终解析
+        lines.append("【4】最终解析")
+        parsed = parse_ddl_time(ddl_time)
+        lines.append(f"  parse_ddl_time('{ddl_time}') → {parsed}")
+        if parsed:
+            import datetime as _dt
+            remaining = (parsed - _dt.datetime.now()).total_seconds() / 3600
+            lines.append(f"  剩余时间: {remaining:.1f} 小时")
+        lines.append("")
+
+        # Step 5: 会触发什么
+        lines.append("【5】触发行为")
+        if self.config.get("enable_auto_reply", False):
+            lines.append("  ✅ auto_reply: 会在群内回复")
+        else:
+            lines.append("  ❌ auto_reply: 已关闭")
+        if self.config.get("silent_mode", True) and self.admin_ids:
+            lines.append(f"  ✅ silent_push: 会推送给 {len(self.admin_ids)} 位管理员")
+        else:
+            lines.append("  ❌ silent_push: 未启用或无管理员")
+        if self.config.get("enable_llm_summary", True):
+            lines.append("  ✅ LLM 总结: 会调用 LLM 生成摘要")
+        else:
+            lines.append("  ❌ LLM 总结: 已关闭")
+
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("ddl_personas")
     async def list_personas(self, event: AstrMessageEvent) -> MessageEventResult:

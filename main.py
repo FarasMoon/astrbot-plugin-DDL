@@ -8,6 +8,7 @@ if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
@@ -16,9 +17,13 @@ from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 
 from lib.detector import parse_keywords, build_pattern, extract_ddl
-from lib.time_parser import resolve_relative_time
+from lib.time_parser import resolve_relative_time, parse_ddl_time
 from lib.summarizer import summarize_ddl
 from lib.renderer import categorize_ddls, format_text_ddl, render_image_card
+
+# ── 常量 ────────────────────────────────────────────────────
+
+MAX_DDL_PER_GROUP = 500  # 每群最多保留的 DDL 条数
 
 
 # ── 静默监听工具函数 ────────────────────────────────────────
@@ -53,23 +58,15 @@ def _format_silent_msg(raw_ddl: dict) -> str:
 # ── DDL 过期清理 ────────────────────────────────────────────
 
 def _clean_expired_ddls(ddl_list: list, now: datetime) -> tuple:
-    """清理已过期的 DDL，返回 (有效列表, 清理数量)"""
+    """清理已过期的 DDL（使用统一的 parse_ddl_time），返回 (有效列表, 清理数量)"""
     valid_ddls = []
     removed_count = 0
     for ddl in ddl_list:
         ddl_time_str = ddl.get('ddl_time', '')
         try:
-            for fmt in ['%m月%d日', '%m月%d日%H点', '%m月%d日%H:%M']:
-                try:
-                    parsed_time = datetime.strptime(ddl_time_str, fmt)
-                    parsed_time = parsed_time.replace(year=now.year)
-                    if parsed_time < now:
-                        removed_count += 1
-                    else:
-                        valid_ddls.append(ddl)
-                    break
-                except ValueError:
-                    continue
+            deadline = parse_ddl_time(ddl_time_str)
+            if deadline and deadline < now:
+                removed_count += 1
             else:
                 valid_ddls.append(ddl)
         except Exception:
@@ -99,6 +96,8 @@ class DDLDetectPlugin(Star):
         self.notification_task = None
         self.monitored_groups: set = set()
         self.admin_ids: list = []
+        self._seen_messages: set = set()  # (group_id, message_id) 去重
+        self._msg_lock = asyncio.Lock()   # 保护 _seen_messages 并发
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查消息发送者是否为管理员"""
@@ -127,7 +126,6 @@ class DDLDetectPlugin(Star):
         if not raw.strip():
             return {}
         try:
-            import json
             return json.loads(raw)
         except Exception:
             logger.warning(f"群名称映射 JSON 解析失败: {raw}")
@@ -172,6 +170,18 @@ class DDLDetectPlugin(Star):
 
         task_desc, ddl_time = ddl_info
         group_id = event.message_obj.group_id or "unknown"
+        msg_id = event.message_obj.message_id
+
+        # 消息级去重
+        async with self._msg_lock:
+            dedup_key = (group_id, msg_id)
+            if dedup_key in self._seen_messages:
+                return
+            self._seen_messages.add(dedup_key)
+            # 限制内存占用
+            if len(self._seen_messages) > 10000:
+                self._seen_messages.clear()
+
         sender_name = event.get_sender_name()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -182,28 +192,27 @@ class DDLDetectPlugin(Star):
             "group_id": group_id,
             "sender": sender_name,
             "detected_at": timestamp,
-            "message_id": event.message_obj.message_id
+            "message_id": msg_id
         }
 
         await self._save_ddl(group_id, raw_ddl)
         self.monitored_groups.add(group_id)
         logger.info(f"检测到 DDL: {message_str}")
 
-        if self.config.get("enable_auto_reply", True):
-            if self.config.get("enable_llm_summary", True):
-                summary = await summarize_ddl(raw_ddl, event, self.context)
-                if summary:
-                    yield event.plain_result(f"已检测到 DDL：{summary}")
+        # LLM 总结（仅调用一次，结果缓存到 KV）
+        summary = await self._summarize_ddl_cached(group_id, raw_ddl, event)
+
+        if self.config.get("enable_auto_reply", False):
+            if summary:
+                yield event.plain_result(f"已检测到 DDL：{summary}")
 
         # 静默监听模式：跨平台推送给所有管理员
         if self.config.get("silent_mode", True) and self.admin_ids:
             silent_whitelist = self.config.get("silent_whitelist", False)
             group_list_str = self.config.get("silent_group_list", "")
             if _should_monitor_group(group_id, silent_whitelist, group_list_str):
-                if self.config.get("enable_llm_summary", True):
-                    summary = await summarize_ddl(raw_ddl, event, self.context)
-                    if summary:
-                        raw_ddl["summary"] = summary
+                if summary:
+                    raw_ddl["summary"] = summary
                 msg_text = _format_silent_msg(raw_ddl)
                 from astrbot.api.star import StarTools
                 import astrbot.api.message_components as Comp
@@ -222,10 +231,34 @@ class DDLDetectPlugin(Star):
     # ── 存储 ──────────────────────────────────────────────────
 
     async def _save_ddl(self, group_id: str, ddl_data: dict) -> None:
+        """保存 DDL（含 KV 上限保护）"""
         key = f"ddl_{group_id}"
         ddl_list = await self.get_kv_data(key, [])
         ddl_list.append(ddl_data)
+        # 每群最多保留 MAX_DDL_PER_GROUP 条
+        if len(ddl_list) > MAX_DDL_PER_GROUP:
+            ddl_list = ddl_list[-MAX_DDL_PER_GROUP:]
         await self.put_kv_data(key, ddl_list)
+
+    async def _summarize_ddl_cached(self, group_id: str, raw_ddl: dict,
+                                     event) -> Optional[str]:
+        """带缓存的 LLM 总结：已有 summary 则跳过，否则调 LLM 并回存 KV"""
+        if raw_ddl.get("summary"):
+            return raw_ddl["summary"]
+        if not self.config.get("enable_llm_summary", True):
+            return None
+        summary = await summarize_ddl(raw_ddl, event, self.context)
+        if summary:
+            raw_ddl["summary"] = summary
+            # 回存到 KV，让以后的查询复用
+            key = f"ddl_{group_id}"
+            ddl_list = await self.get_kv_data(key, [])
+            for ddl in ddl_list:
+                if ddl.get("message_id") == raw_ddl.get("message_id"):
+                    ddl["summary"] = summary
+                    break
+            await self.put_kv_data(key, ddl_list)
+        return summary
 
     # ── 查询 DDL ──────────────────────────────────────────────
 
@@ -317,6 +350,9 @@ class DDLDetectPlugin(Star):
 
         if self.config.get("enable_llm_summary", True):
             for ddl in urgent_ddls + soon_ddls + normal_ddls:
+                # 已有缓存的 summary 不再调 LLM
+                if ddl.get("summary"):
+                    continue
                 summary = await summarize_ddl(ddl, event, self.context)
                 if summary:
                     ddl['summary'] = summary
@@ -550,7 +586,6 @@ class DDLDetectPlugin(Star):
         from astrbot.api.star import StarTools
         import astrbot.api.message_components as Comp
         from astrbot.api.event import MessageChain
-        from lib.time_parser import parse_ddl_time as _parse_time
 
         now = datetime.now()
         notified_count = 0
@@ -577,7 +612,7 @@ class DDLDetectPlugin(Star):
                     if notified_count >= 1:
                         continue
                 else:
-                    deadline = _parse_time(ddl_time_str)
+                    deadline = parse_ddl_time(ddl_time_str)
                     if not deadline:
                         skipped_parse += 1
                         continue
@@ -593,7 +628,7 @@ class DDLDetectPlugin(Star):
                         continue
                     self._reminded_ddls.add(dedup_key)
 
-                deadline = _parse_time(ddl_time_str) if force else deadline
+                deadline = parse_ddl_time(ddl_time_str) if force else deadline
                 remaining = max(0, ((deadline - now).total_seconds() / 3600) if deadline else 0)
 
                 # 构建提醒

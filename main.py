@@ -134,7 +134,7 @@ class DDLDetectPlugin(Star):
                 self._seen_messages.clear()
 
         # 正则+LLM 模式：语义验证过滤误报
-        if self.config.get("ddl_detect_mode", "regex") == "regex_llm":
+        if self.config.get("ddl_detect_mode", "仅正则") == "正则+LLM 验证":
             provider_id = self.config.get("ddl_llm_provider", "") or None
             verified = await classify_ddl(message_str, event, self.context, provider_id)
             if verified is False:
@@ -559,10 +559,10 @@ class DDLDetectPlugin(Star):
         lines.append("")
 
         # Step 3: LLM 语义验证（如果开启）
-        detect_mode = self.config.get("ddl_detect_mode", "regex")
+        detect_mode = self.config.get("ddl_detect_mode", "仅正则")
         lines.append(f"【3】检测模式: {detect_mode}")
 
-        if detect_mode == "regex_llm":
+        if detect_mode == "正则+LLM 验证":
             provider_id = self.config.get("ddl_llm_provider", "") or None
             lines.append("")
             lines.append("【3a】LLM 语义验证 - 发送 prompt:")

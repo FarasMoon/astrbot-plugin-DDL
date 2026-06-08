@@ -355,7 +355,12 @@ class DDLDetectPlugin(Star):
                                     break
                         await self.put_kv_data(key, ddl_list)
 
-        output_format = "image" if self.config.get("output_as_image", True) else "text"
+        output_as_image = self.config.get("output_as_image", True)
+        # 容错：AstrBot 可能将 bool 存为字符串
+        if isinstance(output_as_image, str):
+            output_as_image = output_as_image.lower() in ("true", "1", "yes")
+        output_format = "image" if output_as_image else "text"
+        logger.info(f"[_format_ddl_output] output_as_image={self.config.get('output_as_image')} → {output_format}")
         source_info = ""
         if group_id == "__admin_all_groups__":
             source_info = self._build_source_info(today_ddls)
@@ -378,6 +383,13 @@ class DDLDetectPlugin(Star):
                 ]
             except Exception as e:
                 logger.error(f"生成图片失败: {e}")
+                fallback = format_text_ddl(urgent_ddls, soon_ddls, normal_ddls,
+                                           urgent_hours, soon_hours, source_info)
+                return [
+                    ("text", f"❌ 图片生成失败: {e}"),
+                    ("text", fallback + f"\n\n🕐 {gen_time}"),
+                ]
+        # 文字模式
         return [("text", format_text_ddl(urgent_ddls, soon_ddls, normal_ddls,
                                          urgent_hours, soon_hours, source_info) + f"\n\n🕐 {gen_time}")]
 

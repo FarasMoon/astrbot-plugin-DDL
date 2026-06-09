@@ -37,7 +37,6 @@ class DDLDetectPlugin(Star):
         self.custom_time_patterns = self._parse_custom_time_patterns(config.get("custom_time_patterns", ""))
         self.ddl_pattern = build_pattern(self.keywords, self.custom_time_patterns or None)
         self.time_re = build_time_re(self.custom_time_patterns or None)
-        self.notification_task = None
         self.monitored_groups: set = set()
         self.admin_ids: list = []
         self._seen_messages: set = set()  # (group_id, message_id) 去重
@@ -60,8 +59,6 @@ class DDLDetectPlugin(Star):
     # ── 事件处理 ──────────────────────────────────────────────
 
     async def initialize(self) -> None:
-        times_str = self.config.get("notification_times", "08:00")
-        self.notification_times = [t.strip() for t in times_str.split(",") if t.strip()]
         admin_str = self.config.get("silent_admin_sid", "")
         self.admin_ids = [a.strip() for a in admin_str.split(",") if a.strip()]
         # 群名映射
@@ -69,9 +66,13 @@ class DDLDetectPlugin(Star):
         # 截止提醒追踪（从 KV 恢复以跨重启持久化）
         stored = await self.get_kv_data("__reminded_ddls", [])
         self._reminded_ddls: set = set(tuple(x) for x in stored) if stored else set()
+        # 从 KV 恢复已监听群组列表（跨重启持久化）
+        stored_groups = await self.get_kv_data("__monitored_groups", [])
+        if stored_groups:
+            self.monitored_groups.update(stored_groups)
         # 启动截止前提醒后台任务
         self._reminder_task = asyncio.ensure_future(self._deadline_reminder_loop())
-        logger.info(f"AutoDDLDetect 已加载，关键词: {self.keywords}，通知时间: {self.notification_times}，管理员: {self.admin_ids}")
+        logger.info(f"AutoDDLDetect 已加载，关键词: {self.keywords}，管理员: {self.admin_ids}")
 
     def _get_summary_lock(self, group_id: str) -> asyncio.Lock:
         """获取 per-group 锁（懒创建）"""
@@ -121,6 +122,10 @@ class DDLDetectPlugin(Star):
     async def on_group_message(self, event: AstrMessageEvent) -> MessageEventResult:
         """监听群消息，检测 DDL 格式"""
         message_str = event.message_str.strip()
+
+        # 跳过命令消息（/ddl, /clearddl, /ddl_debug 等），避免命令内容被误检测保存
+        if message_str.startswith(("/ddl", "/clearddl", "/清除ddl", "/清除所有ddl", "/ddl_remind_test", "/ddl_debug", "/清除")):
+            return
 
         # 第一关：关键词预筛——消息中必须包含至少一个 DDL 关键词（不区分大小写）
         msg_lower = message_str.lower()
@@ -179,6 +184,7 @@ class DDLDetectPlugin(Star):
 
         await self._save_ddl(group_id, raw_ddl)
         self.monitored_groups.add(group_id)
+        await self.put_kv_data("__monitored_groups", list(self.monitored_groups))
         logger.info(f"检测到 DDL: {message_str}")
 
         # LLM 总结（仅调用一次，结果缓存到 KV）
@@ -383,15 +389,15 @@ class DDLDetectPlugin(Star):
 
     @filter.command("clearddl", aliases=["清除ddl"])
     async def clear_ddl(self, event: AstrMessageEvent) -> MessageEventResult:
-        """清除当前群聊/用户的 DDL；静默监听模式下管理员清除所有"""
+        """清除当前群的 DDL；管理员私聊时清除所有群"""
         group_id = event.message_obj.group_id
 
-        # 静默监听模式 + 管理员（群聊或私聊）→ 清除所有群的 DDL
-        if self.config.get("silent_mode", True) and self._is_admin(event):
+        # 管理员在私聊中 → 清除所有群的 DDL
+        if not group_id and self._is_admin(event):
             yield event.plain_result(await self._clear_all_groups_ddl())
             return
 
-        # 普通用户：清除当前群/私聊的 DDL
+        # 群聊（含管理员）：仅清除本群今日 DDL
         gid = group_id or "unknown"
         key = f"ddl_{gid}"
         ddl_list = await self.get_kv_data(key, [])
@@ -425,6 +431,7 @@ class DDLDetectPlugin(Star):
             total_removed += 1
 
         self.monitored_groups.clear()
+        await self.put_kv_data("__monitored_groups", [])
         return f"✅ 已清除 {total_removed} 个群的全部 DDL 记录"
 
     @filter.command("ddl_remind_test")
@@ -638,12 +645,6 @@ class DDLDetectPlugin(Star):
         yield event.plain_result("\n".join(lines))
     # ── 销毁 ──────────────────────────────────────────────────
     async def terminate(self) -> None:
-        if self.notification_task and not self.notification_task.done():
-            self.notification_task.cancel()
-            try:
-                await self.notification_task
-            except asyncio.CancelledError:
-                pass
         if self._reminder_task and not self._reminder_task.done():
             self._reminder_task.cancel()
             try:

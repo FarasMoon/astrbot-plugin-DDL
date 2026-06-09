@@ -78,17 +78,6 @@
     "hint": "0.0 为完全透明，1.0 为完全不透明",
     "condition": {"background_as_image": true}
   },
-  "enable_notification": {
-    "description": "是否启用定时通知",
-    "type": "bool",
-    "default": false
-  },
-  "notification_times": {
-    "description": "定时通知时间（多个用英文逗号分隔）",
-    "type": "string",
-    "default": "08:00",
-    "hint": "格式：HH:MM,HH:MM，如 08:00,18:00,22:00"
-  },
   "silent_mode": {
     "description": "静默监听模式",
     "type": "bool",
